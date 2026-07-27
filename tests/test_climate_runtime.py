@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 try:
     from homeassistant.components.climate.const import HVACMode
+    from homeassistant.components.fan import FanEntityFeature
+    from homeassistant.const import ATTR_SUPPORTED_FEATURES
     from homeassistant.core import Event, State
     from homeassistant.exceptions import HomeAssistantError
 except ModuleNotFoundError as err:
@@ -16,8 +18,8 @@ except ModuleNotFoundError as err:
 
 from custom_components.better_climate.climate import BetterClimate
 from custom_components.better_climate.const import (
-    CONF_CEILING_FAN,
     CONF_COOLING_ENTITY,
+    CONF_FAN,
     CONF_FORCE_OFFSET,
     CONF_HEATING_ENTITY,
     CONF_HYSTERESIS,
@@ -72,6 +74,7 @@ def make_entity(
     sensor_state: str = "24",
     fan_state: str | None = None,
     fan_direction: str = "forward",
+    fan_supports_direction: bool = True,
 ) -> tuple[BetterClimate, FakeServices]:
     """Create a Better Climate entity with in-memory sources."""
     services = FakeServices()
@@ -81,7 +84,16 @@ def make_entity(
         SENSOR: State(SENSOR, sensor_state),
     }
     if fan_state is not None:
-        states[FAN] = State(FAN, fan_state, {"direction": fan_direction})
+        states[FAN] = State(
+            FAN,
+            fan_state,
+            {
+                "direction": fan_direction,
+                ATTR_SUPPORTED_FEATURES: int(FanEntityFeature.DIRECTION)
+                if fan_supports_direction
+                else 0,
+            },
+        )
     data = {
         "name": "Room",
         CONF_COOLING_ENTITY: COOLING,
@@ -92,7 +104,7 @@ def make_entity(
         CONF_MIN_COMMAND_INTERVAL: 30,
     }
     if fan_state is not None:
-        data[CONF_CEILING_FAN] = FAN
+        data[CONF_FAN] = FAN
     hass = SimpleNamespace(
         states=FakeStates(states),
         services=services,
@@ -288,6 +300,19 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await entity._async_sync_ceiling_fan(HVACMode.COOL)
 
         self.assertEqual(services.calls, [])
+
+    async def test_generic_fan_skips_direction_and_follows_hvac_power(self) -> None:
+        entity, services = make_entity(
+            fan_state="off",
+            fan_supports_direction=False,
+        )
+
+        await entity._async_sync_ceiling_fan(HVACMode.COOL)
+
+        self.assertEqual(
+            services.calls,
+            [("fan", "turn_on", {"entity_id": FAN}, True)],
+        )
 
     async def test_ceiling_fan_reverses_for_heat_and_turns_off_with_hvac(
         self,

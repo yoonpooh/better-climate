@@ -26,12 +26,14 @@ from homeassistant.components.fan import (
     SERVICE_SET_DIRECTION,
     SERVICE_TURN_OFF,
     SERVICE_TURN_ON,
+    FanEntityFeature,
 )
 from homeassistant.components.fan import (
     DOMAIN as FAN_DOMAIN,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
+    ATTR_SUPPORTED_FEATURES,
     ATTR_TEMPERATURE,
     CONF_NAME,
     STATE_OFF,
@@ -55,8 +57,8 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import (
-    CONF_CEILING_FAN,
     CONF_COOLING_ENTITY,
+    CONF_FAN,
     CONF_FORCE_OFFSET,
     CONF_HEATING_ENTITY,
     CONF_HYSTERESIS,
@@ -98,7 +100,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         self._entry = entry
         self._cooling_entity = entry.data[CONF_COOLING_ENTITY]
         self._heating_entity = entry.data.get(CONF_HEATING_ENTITY)
-        self._ceiling_fan_entity = entry.data.get(CONF_CEILING_FAN)
+        self._ceiling_fan_entity = entry.data.get(CONF_FAN)
         self._sensor_entity = entry.data[CONF_TEMPERATURE_SENSOR]
         self._hysteresis = float(entry.data[CONF_HYSTERESIS])
         self._force_offset = float(entry.data[CONF_FORCE_OFFSET])
@@ -355,7 +357,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         return {
             "cooling_source": self._cooling_entity,
             "heating_source": self._heating_entity,
-            "ceiling_fan": self._ceiling_fan_entity,
+            "fan": self._ceiling_fan_entity,
             "temperature_sensor": self._sensor_entity,
             "cooling_source_hvac_mode": self._state_value(self._cooling_source),
             "heating_source_hvac_mode": self._state_value(self._heating_source),
@@ -888,11 +890,16 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             if mode == HVACMode.HEAT
             else None
         )
+        if not (
+            FanEntityFeature(fan.attributes.get(ATTR_SUPPORTED_FEATURES, 0))
+            & FanEntityFeature.DIRECTION
+        ):
+            direction = None
         matches = (
             fan.state == STATE_OFF
             if mode == HVACMode.OFF
             else fan.state == STATE_ON
-            and fan.attributes.get(ATTR_DIRECTION) == direction
+            and (direction is None or fan.attributes.get(ATTR_DIRECTION) == direction)
         )
         if matches:
             self._cancel_ceiling_fan_retry()
@@ -915,7 +922,10 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             if mode not in (HVACMode.COOL, HVACMode.HEAT):
                 return
 
-            if fan.attributes.get(ATTR_DIRECTION) != direction:
+            if (
+                direction is not None
+                and fan.attributes.get(ATTR_DIRECTION) != direction
+            ):
                 await self.hass.services.async_call(
                     FAN_DOMAIN,
                     SERVICE_SET_DIRECTION,
