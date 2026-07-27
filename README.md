@@ -18,6 +18,7 @@ conditioning.
 - External room temperature sensor for both cooling and heating
 - One shared target temperature
 - Optional boiler support
+- Optional ceiling fan coordination
 - Cooling and heating interlock
 - Configurable hysteresis and source offset
 - Minimum command interval to reduce repeated device commands
@@ -28,7 +29,7 @@ conditioning.
 - UI-based setup and reconfiguration
 
 Fan speed, swing, presets, humidity, and outdoor-temperature controls remain on
-the original climate entities.
+the original entities.
 
 ## How It Works
 
@@ -81,6 +82,7 @@ Go to **Settings > Devices & services > Add integration**, search for
 | Name | Name of the virtual climate entity | `Better Climate` |
 | Air conditioner | Climate entity used for cooling | Required |
 | Boiler | Climate entity used for heating | Optional |
+| Ceiling fan | Fan turned forward with cooling, reversed with heating, and off with HVAC | Optional |
 | Room temperature sensor | External room temperature | Required |
 | Room temperature hysteresis | Difference required before changing demand | `0.3 °C` |
 | Source force offset | Adjustment applied around the source temperature | `0.5 °C` |
@@ -91,6 +93,8 @@ The resulting entity is cooling-only when no boiler is selected.
 ## Safety Behavior
 
 - Cooling and heating are mutually exclusive.
+- A configured ceiling fan stays on while the active HVAC mode is idle and turns
+  off only when the HVAC mode turns off.
 - Turning off Better Climate attempts to turn off every configured source.
 - Invalid or unavailable sensor readings stop external correction and restore
   the virtual target to the active source.

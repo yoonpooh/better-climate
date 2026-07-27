@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import deque
 from collections.abc import Callable
 from math import floor, isfinite
@@ -18,10 +19,23 @@ from homeassistant.components.climate.const import (
     HVACAction,
     HVACMode,
 )
+from homeassistant.components.fan import (
+    ATTR_DIRECTION,
+    DIRECTION_FORWARD,
+    DIRECTION_REVERSE,
+    SERVICE_SET_DIRECTION,
+    SERVICE_TURN_OFF,
+    SERVICE_TURN_ON,
+)
+from homeassistant.components.fan import (
+    DOMAIN as FAN_DOMAIN,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     ATTR_TEMPERATURE,
     CONF_NAME,
+    STATE_OFF,
+    STATE_ON,
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
 )
@@ -41,6 +55,7 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import (
+    CONF_CEILING_FAN,
     CONF_COOLING_ENTITY,
     CONF_FORCE_OFFSET,
     CONF_HEATING_ENTITY,
@@ -58,6 +73,7 @@ from .control import (
 
 EXPECTED_TARGET_TTL = 120
 MAX_EXPECTED_TARGETS = 8
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -82,6 +98,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         self._entry = entry
         self._cooling_entity = entry.data[CONF_COOLING_ENTITY]
         self._heating_entity = entry.data.get(CONF_HEATING_ENTITY)
+        self._ceiling_fan_entity = entry.data.get(CONF_CEILING_FAN)
         self._sensor_entity = entry.data[CONF_TEMPERATURE_SENSOR]
         self._hysteresis = float(entry.data[CONF_HYSTERESIS])
         self._force_offset = float(entry.data[CONF_FORCE_OFFSET])
@@ -99,6 +116,9 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         self._last_command_at = 0.0
         self._last_requested_temperature: float | None = None
         self._expected_source_temperatures: dict[str, deque[tuple[float, float]]] = {}
+        self._ceiling_fan_mode: HVACMode | None = None
+        self._ceiling_fan_retry_used = False
+        self._ceiling_fan_retry_timer: Callable[[], None] | None = None
         self._pending_timer: Callable[[], None] | None = None
         self._control_lock = asyncio.Lock()
         self._transition_lock = asyncio.Lock()
@@ -133,6 +153,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                         self._cooling_entity,
                         self._heating_entity,
                         self._sensor_entity,
+                        self._ceiling_fan_entity,
                     )
                     if entity_id is not None
                 ],
@@ -140,6 +161,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             )
         )
         self.async_on_remove(self._cancel_pending_timer)
+        self.async_on_remove(self._cancel_ceiling_fan_retry)
         self.hass.async_create_task(self._async_initialize_control())
 
     @callback
@@ -333,6 +355,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         return {
             "cooling_source": self._cooling_entity,
             "heating_source": self._heating_entity,
+            "ceiling_fan": self._ceiling_fan_entity,
             "temperature_sensor": self._sensor_entity,
             "cooling_source_hvac_mode": self._state_value(self._cooling_source),
             "heating_source_hvac_mode": self._state_value(self._heating_source),
@@ -420,6 +443,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             },
             blocking=True,
         )
+        await self._async_sync_ceiling_fan(HVACMode.COOL)
         await self._async_reconcile(force=True)
         self.async_write_ha_state()
 
@@ -447,6 +471,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             },
             blocking=True,
         )
+        await self._async_sync_ceiling_fan(HVACMode.HEAT)
         await self._async_reconcile(force=True)
         self.async_write_ha_state()
 
@@ -477,6 +502,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             except Exception as err:  # noqa: BLE001
                 # Continue so one failed source cannot leave the other running.
                 errors.append(f"{entity_id}: {err}")
+        await self._async_sync_ceiling_fan()
         self.async_write_ha_state()
         if errors:
             raise HomeAssistantError(
@@ -572,6 +598,12 @@ class BetterClimate(ClimateEntity, RestoreEntity):
     @callback
     def _async_source_changed(self, event: Event[EventStateChangedData]) -> None:
         entity_id = event.data["entity_id"]
+        if entity_id == self._ceiling_fan_entity:
+            old_state = event.data["old_state"]
+            new_state = event.data["new_state"]
+            if not self._is_available(old_state) and self._is_available(new_state):
+                self.hass.async_create_task(self._async_sync_ceiling_fan(retry=True))
+            return
         target_changed = self._sync_target_from_event(event)
         self.async_write_ha_state()
         if entity_id in (self._cooling_entity, self._heating_entity):
@@ -650,6 +682,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             elif entity_id == self._heating_entity:
                 self._heating_required = False
 
+            await self._async_sync_ceiling_fan()
             await self._async_reconcile(force=force)
             self.async_write_ha_state()
 
@@ -674,6 +707,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 self._last_active_mode = HVACMode.COOL
             elif heating_active:
                 self._last_active_mode = HVACMode.HEAT
+            await self._async_sync_ceiling_fan()
             await self._async_reconcile(force=True)
             self.async_write_ha_state()
 
@@ -820,3 +854,131 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         if self._pending_timer is not None:
             self._pending_timer()
             self._pending_timer = None
+
+    async def _async_sync_ceiling_fan(
+        self, mode: HVACMode | None = None, *, retry: bool = False
+    ) -> None:
+        """Match the optional ceiling fan to the active HVAC mode."""
+        if self._ceiling_fan_entity is None:
+            return
+        if mode is None:
+            mode = self._ceiling_fan_hvac_mode()
+        if mode is None:
+            return
+        if retry:
+            self._cancel_ceiling_fan_retry()
+            if mode != self._ceiling_fan_mode or self._ceiling_fan_hvac_mode() != mode:
+                return
+            self._ceiling_fan_retry_used = True
+        elif mode != self._ceiling_fan_mode:
+            self._cancel_ceiling_fan_retry()
+            self._ceiling_fan_mode = mode
+            self._ceiling_fan_retry_used = False
+
+        fan = self.hass.states.get(self._ceiling_fan_entity)
+        if fan is None or not self._is_available(fan):
+            if not retry:
+                self._set_ceiling_fan_retry(mode)
+            return
+
+        direction = (
+            DIRECTION_FORWARD
+            if mode == HVACMode.COOL
+            else DIRECTION_REVERSE
+            if mode == HVACMode.HEAT
+            else None
+        )
+        matches = (
+            fan.state == STATE_OFF
+            if mode == HVACMode.OFF
+            else fan.state == STATE_ON
+            and fan.attributes.get(ATTR_DIRECTION) == direction
+        )
+        if matches:
+            self._cancel_ceiling_fan_retry()
+            return
+        if not retry and (
+            self._ceiling_fan_retry_used or self._ceiling_fan_retry_timer is not None
+        ):
+            return
+
+        try:
+            if mode == HVACMode.OFF:
+                if fan.state != STATE_OFF:
+                    await self.hass.services.async_call(
+                        FAN_DOMAIN,
+                        SERVICE_TURN_OFF,
+                        {"entity_id": self._ceiling_fan_entity},
+                        blocking=True,
+                    )
+                return
+            if mode not in (HVACMode.COOL, HVACMode.HEAT):
+                return
+
+            if fan.attributes.get(ATTR_DIRECTION) != direction:
+                await self.hass.services.async_call(
+                    FAN_DOMAIN,
+                    SERVICE_SET_DIRECTION,
+                    {
+                        "entity_id": self._ceiling_fan_entity,
+                        ATTR_DIRECTION: direction,
+                    },
+                    blocking=True,
+                )
+            if fan.state != STATE_ON:
+                await self.hass.services.async_call(
+                    FAN_DOMAIN,
+                    SERVICE_TURN_ON,
+                    {"entity_id": self._ceiling_fan_entity},
+                    blocking=True,
+                )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning(
+                "Failed to synchronize ceiling fan %s: %s",
+                self._ceiling_fan_entity,
+                err,
+            )
+        if not retry:
+            self._set_ceiling_fan_retry(mode)
+
+    def _ceiling_fan_hvac_mode(self) -> HVACMode | None:
+        """Return an explicit active or fully-off mode, preserving unknown states."""
+        cooling = self._cooling_source
+        heating = self._heating_source
+        cooling_active = cooling is not None and cooling.state == HVACMode.COOL
+        heating_active = heating is not None and heating.state == HVACMode.HEAT
+        if cooling_active and heating_active:
+            return self._last_active_mode
+        if cooling_active:
+            return HVACMode.COOL
+        if heating_active:
+            return HVACMode.HEAT
+        sources = [cooling]
+        if self._heating_entity is not None:
+            sources.append(heating)
+        if all(
+            source is not None and source.state == HVACMode.OFF for source in sources
+        ):
+            return HVACMode.OFF
+        return None
+
+    @callback
+    def _set_ceiling_fan_retry(self, mode: HVACMode) -> None:
+        """Schedule one verification and retry for a fan command."""
+        if self._ceiling_fan_retry_timer is not None or self._ceiling_fan_retry_used:
+            return
+
+        @callback
+        def _run(_now) -> None:
+            self._ceiling_fan_retry_timer = None
+            self.hass.async_create_task(self._async_sync_ceiling_fan(mode, retry=True))
+
+        self._ceiling_fan_retry_timer = async_call_later(
+            self.hass, self._min_command_interval, _run
+        )
+
+    @callback
+    def _cancel_ceiling_fan_retry(self) -> None:
+        if self._ceiling_fan_retry_timer is not None:
+            self._ceiling_fan_retry_timer()
+            self._ceiling_fan_retry_timer = None

@@ -13,8 +13,10 @@ from homeassistant.components.climate.const import (
     ATTR_MIN_TEMP,
     HVACMode,
 )
+from homeassistant.components.fan import DOMAIN as FAN_DOMAIN
+from homeassistant.components.fan import FanEntityFeature
 from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
-from homeassistant.const import CONF_NAME
+from homeassistant.const import ATTR_SUPPORTED_FEATURES, CONF_NAME
 from homeassistant.helpers.selector import (
     EntitySelector,
     EntitySelectorConfig,
@@ -24,6 +26,7 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    CONF_CEILING_FAN,
     CONF_COOLING_ENTITY,
     CONF_FORCE_OFFSET,
     CONF_HEATING_ENTITY,
@@ -73,7 +76,7 @@ class BetterClimateConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_update_reload_and_abort(
                     entry,
                     title=user_input[CONF_NAME],
-                    data_updates=user_input,
+                    data=user_input,
                 )
 
         return self.async_show_form(
@@ -146,6 +149,23 @@ class BetterClimateConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         else:
             if not isfinite(sensor_temperature):
                 errors[CONF_TEMPERATURE_SENSOR] = "temperature_not_available"
+
+        fan_entity = data.get(CONF_CEILING_FAN)
+        if fan_entity:
+            fan = self.hass.states.get(fan_entity)
+            required_features = (
+                FanEntityFeature.DIRECTION
+                | FanEntityFeature.TURN_OFF
+                | FanEntityFeature.TURN_ON
+            )
+            if fan is None:
+                errors[CONF_CEILING_FAN] = "entity_not_found"
+            elif (
+                FanEntityFeature(fan.attributes.get(ATTR_SUPPORTED_FEATURES, 0))
+                & required_features
+                != required_features
+            ):
+                errors[CONF_CEILING_FAN] = "fan_features_not_supported"
         return errors
 
     @staticmethod
@@ -174,6 +194,14 @@ class BetterClimateConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if CONF_TEMPERATURE_SENSOR in defaults
             else vol.Required(CONF_TEMPERATURE_SENSOR)
         )
+        fan_key = (
+            vol.Optional(
+                CONF_CEILING_FAN,
+                default=defaults[CONF_CEILING_FAN],
+            )
+            if defaults.get(CONF_CEILING_FAN)
+            else vol.Optional(CONF_CEILING_FAN)
+        )
         return vol.Schema(
             {
                 vol.Required(
@@ -192,6 +220,7 @@ class BetterClimateConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         device_class="temperature",
                     )
                 ),
+                fan_key: EntitySelector(EntitySelectorConfig(domain=FAN_DOMAIN)),
                 vol.Optional(
                     CONF_HYSTERESIS,
                     default=defaults.get(CONF_HYSTERESIS, DEFAULT_HYSTERESIS),

@@ -5,6 +5,7 @@ import unittest
 from collections import deque
 from time import monotonic
 from types import SimpleNamespace
+from unittest.mock import patch
 
 try:
     from homeassistant.components.climate.const import HVACMode
@@ -15,6 +16,7 @@ except ModuleNotFoundError as err:
 
 from custom_components.better_climate.climate import BetterClimate
 from custom_components.better_climate.const import (
+    CONF_CEILING_FAN,
     CONF_COOLING_ENTITY,
     CONF_FORCE_OFFSET,
     CONF_HEATING_ENTITY,
@@ -26,6 +28,7 @@ from custom_components.better_climate.const import (
 COOLING = "climate.cooling"
 HEATING = "climate.heating"
 SENSOR = "sensor.room_temperature"
+FAN = "fan.ceiling"
 
 
 class FakeStates:
@@ -67,30 +70,37 @@ def make_entity(
     cooling_state: str = HVACMode.OFF,
     heating_state: str = HVACMode.OFF,
     sensor_state: str = "24",
+    fan_state: str | None = None,
+    fan_direction: str = "forward",
 ) -> tuple[BetterClimate, FakeServices]:
     """Create a Better Climate entity with in-memory sources."""
     services = FakeServices()
+    states = {
+        COOLING: climate_state(COOLING, cooling_state),
+        HEATING: climate_state(HEATING, heating_state),
+        SENSOR: State(SENSOR, sensor_state),
+    }
+    if fan_state is not None:
+        states[FAN] = State(FAN, fan_state, {"direction": fan_direction})
+    data = {
+        "name": "Room",
+        CONF_COOLING_ENTITY: COOLING,
+        CONF_HEATING_ENTITY: HEATING,
+        CONF_TEMPERATURE_SENSOR: SENSOR,
+        CONF_HYSTERESIS: 0.3,
+        CONF_FORCE_OFFSET: 0.5,
+        CONF_MIN_COMMAND_INTERVAL: 30,
+    }
+    if fan_state is not None:
+        data[CONF_CEILING_FAN] = FAN
     hass = SimpleNamespace(
-        states=FakeStates(
-            {
-                COOLING: climate_state(COOLING, cooling_state),
-                HEATING: climate_state(HEATING, heating_state),
-                SENSOR: State(SENSOR, sensor_state),
-            }
-        ),
+        states=FakeStates(states),
         services=services,
         config=SimpleNamespace(units=SimpleNamespace(temperature_unit="°C")),
+        loop=asyncio.get_running_loop(),
     )
     entry = SimpleNamespace(
-        data={
-            "name": "Room",
-            CONF_COOLING_ENTITY: COOLING,
-            CONF_HEATING_ENTITY: HEATING,
-            CONF_TEMPERATURE_SENSOR: SENSOR,
-            CONF_HYSTERESIS: 0.3,
-            CONF_FORCE_OFFSET: 0.5,
-            CONF_MIN_COMMAND_INTERVAL: 30,
-        },
+        data=data,
         entry_id="test",
     )
     entity = BetterClimate(hass, entry)
@@ -253,3 +263,119 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(entity._sync_target_from_event(expected))
         self.assertNotIn(COOLING, entity._expected_source_temperatures)
         self.assertEqual(entity.target_temperature, 24)
+
+    async def test_ceiling_fan_follows_hvac_mode_and_ignores_idle(self) -> None:
+        entity, services = make_entity(fan_state="off", fan_direction="reverse")
+
+        await entity._async_sync_ceiling_fan(HVACMode.COOL)
+
+        self.assertEqual(
+            services.calls,
+            [
+                (
+                    "fan",
+                    "set_direction",
+                    {"entity_id": FAN, "direction": "forward"},
+                    True,
+                ),
+                ("fan", "turn_on", {"entity_id": FAN}, True),
+            ],
+        )
+
+        services.calls.clear()
+        entity._cooling_required = False
+
+        await entity._async_sync_ceiling_fan(HVACMode.COOL)
+
+        self.assertEqual(services.calls, [])
+
+    async def test_ceiling_fan_reverses_for_heat_and_turns_off_with_hvac(
+        self,
+    ) -> None:
+        entity, services = make_entity(fan_state="on", fan_direction="forward")
+
+        await entity._async_sync_ceiling_fan(HVACMode.HEAT)
+        entity.hass.states._states[FAN] = State(FAN, "on", {"direction": "reverse"})
+        await entity._async_sync_ceiling_fan(HVACMode.OFF)
+
+        self.assertEqual(
+            services.calls,
+            [
+                (
+                    "fan",
+                    "set_direction",
+                    {"entity_id": FAN, "direction": "reverse"},
+                    True,
+                ),
+                ("fan", "turn_off", {"entity_id": FAN}, True),
+            ],
+        )
+
+    async def test_ceiling_fan_stays_on_when_source_state_is_unknown(self) -> None:
+        entity, services = make_entity(
+            cooling_state="unavailable",
+            heating_state="off",
+            fan_state="on",
+        )
+
+        await entity._async_sync_ceiling_fan()
+
+        self.assertEqual(services.calls, [])
+
+    async def test_ceiling_fan_retries_a_mismatch_only_once_per_mode(self) -> None:
+        entity, services = make_entity(
+            cooling_state=HVACMode.COOL,
+            fan_state="off",
+            fan_direction="forward",
+        )
+        tasks = []
+        entity.hass.async_create_task = tasks.append
+
+        with patch(
+            "custom_components.better_climate.climate.async_call_later",
+            return_value=lambda: None,
+        ) as call_later:
+            await entity._async_sync_ceiling_fan(HVACMode.COOL)
+
+            self.assertEqual(call_later.call_count, 1)
+            retry_callback = call_later.call_args.args[2]
+            services.calls.clear()
+            retry_callback(None)
+            await tasks.pop()
+
+            self.assertEqual(
+                services.calls,
+                [("fan", "turn_on", {"entity_id": FAN}, True)],
+            )
+            self.assertEqual(call_later.call_count, 1)
+
+    async def test_ceiling_fan_recovery_triggers_the_retry(self) -> None:
+        entity, services = make_entity(
+            cooling_state=HVACMode.COOL,
+            fan_state="off",
+            fan_direction="forward",
+        )
+        entity._ceiling_fan_mode = HVACMode.COOL
+        entity._ceiling_fan_retry_used = True
+        tasks = []
+        entity.hass.async_create_task = tasks.append
+        old_state = State(FAN, "unavailable")
+        new_state = State(FAN, "off", {"direction": "forward"})
+        entity.hass.states._states[FAN] = new_state
+
+        entity._async_source_changed(
+            Event(
+                "state_changed",
+                {
+                    "entity_id": FAN,
+                    "old_state": old_state,
+                    "new_state": new_state,
+                },
+            )
+        )
+        await tasks.pop()
+
+        self.assertEqual(
+            services.calls,
+            [("fan", "turn_on", {"entity_id": FAN}, True)],
+        )

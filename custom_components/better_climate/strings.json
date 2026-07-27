@@ -8,6 +8,7 @@
           "name": "Name",
           "cooling_entity": "Air conditioner",
           "heating_entity": "Boiler (optional)",
+          "ceiling_fan": "Ceiling fan (optional)",
           "temperature_sensor": "Room temperature sensor",
           "hysteresis": "Room temperature hysteresis",
           "force_offset": "Source force offset",
@@ -21,6 +22,7 @@
           "name": "Name",
           "cooling_entity": "Air conditioner",
           "heating_entity": "Boiler (optional)",
+          "ceiling_fan": "Ceiling fan (optional)",
           "temperature_sensor": "Room temperature sensor",
           "hysteresis": "Room temperature hysteresis",
           "force_offset": "Source force offset",
@@ -32,6 +34,7 @@
       "entity_not_found": "The selected entity was not found.",
       "cool_not_supported": "The selected air conditioner does not support cool mode.",
       "heat_not_supported": "The selected boiler does not support heat mode.",
+      "fan_features_not_supported": "The selected fan must support on, off, and direction control.",
       "sources_must_differ": "Cooling and heating must use different entities.",
       "temperature_ranges_do_not_overlap": "The cooling and heating target-temperature ranges do not overlap.",
       "temperature_not_available": "The selected entity does not provide a numeric temperature."

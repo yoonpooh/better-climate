@@ -4,6 +4,7 @@ DOMAIN = "better_climate"
 
 CONF_COOLING_ENTITY = "cooling_entity"
 CONF_HEATING_ENTITY = "heating_entity"
+CONF_CEILING_FAN = "ceiling_fan"
 CONF_TEMPERATURE_SENSOR = "temperature_sensor"
 CONF_HYSTERESIS = "hysteresis"
 CONF_FORCE_OFFSET = "force_offset"
