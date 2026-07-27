@@ -1,0 +1,44 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Better Climate 설정",
+        "description": "외부 실내 온도 센서를 기준으로 냉방과 선택형 난방을 제어합니다.",
+        "data": {
+          "name": "이름",
+          "cooling_entity": "에어컨",
+          "heating_entity": "보일러 (선택)",
+          "temperature_sensor": "실내 온도 센서",
+          "hysteresis": "실내 온도 히스테리시스",
+          "force_offset": "냉난방 강제 보정 폭",
+          "min_command_interval": "최소 명령 간격"
+        }
+      },
+      "reconfigure": {
+        "title": "Better Climate 재설정",
+        "description": "냉난방 소스와 온도 센서 및 제어 설정을 변경합니다.",
+        "data": {
+          "name": "이름",
+          "cooling_entity": "에어컨",
+          "heating_entity": "보일러 (선택)",
+          "temperature_sensor": "실내 온도 센서",
+          "hysteresis": "실내 온도 히스테리시스",
+          "force_offset": "냉난방 강제 보정 폭",
+          "min_command_interval": "최소 명령 간격"
+        }
+      }
+    },
+    "error": {
+      "entity_not_found": "선택한 엔티티를 찾을 수 없습니다.",
+      "cool_not_supported": "선택한 에어컨은 냉방 모드를 지원하지 않습니다.",
+      "heat_not_supported": "선택한 보일러는 난방 모드를 지원하지 않습니다.",
+      "sources_must_differ": "냉방과 난방에는 서로 다른 엔티티를 선택해야 합니다.",
+      "temperature_ranges_do_not_overlap": "냉방과 난방 장치의 목표 온도 범위가 겹치지 않습니다.",
+      "temperature_not_available": "선택한 엔티티에서 숫자 온도를 읽을 수 없습니다."
+    },
+    "abort": {
+      "already_configured": "이미 설정된 에어컨입니다.",
+      "reconfigure_successful": "설정을 변경했습니다."
+    }
+  }
+}

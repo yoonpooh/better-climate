@@ -1,0 +1,11 @@
+{
+  "domain": "better_climate",
+  "name": "Better Climate",
+  "codeowners": [],
+  "config_flow": true,
+  "documentation": "https://github.com/yoonpooh/better-climate",
+  "integration_type": "device",
+  "iot_class": "calculated",
+  "requirements": [],
+  "version": "0.2.1"
+}

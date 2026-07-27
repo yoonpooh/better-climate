@@ -1,0 +1,44 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Better Climate",
+        "description": "Coordinate cooling and optional heating using an external room temperature sensor.",
+        "data": {
+          "name": "Name",
+          "cooling_entity": "Air conditioner",
+          "heating_entity": "Boiler (optional)",
+          "temperature_sensor": "Room temperature sensor",
+          "hysteresis": "Room temperature hysteresis",
+          "force_offset": "Source force offset",
+          "min_command_interval": "Minimum command interval"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Better Climate",
+        "description": "Update the climate sources, sensor, and temperature-control settings.",
+        "data": {
+          "name": "Name",
+          "cooling_entity": "Air conditioner",
+          "heating_entity": "Boiler (optional)",
+          "temperature_sensor": "Room temperature sensor",
+          "hysteresis": "Room temperature hysteresis",
+          "force_offset": "Source force offset",
+          "min_command_interval": "Minimum command interval"
+        }
+      }
+    },
+    "error": {
+      "entity_not_found": "The selected entity was not found.",
+      "cool_not_supported": "The selected air conditioner does not support cool mode.",
+      "heat_not_supported": "The selected boiler does not support heat mode.",
+      "sources_must_differ": "Cooling and heating must use different entities.",
+      "temperature_ranges_do_not_overlap": "The cooling and heating target-temperature ranges do not overlap.",
+      "temperature_not_available": "The selected entity does not provide a numeric temperature."
+    },
+    "abort": {
+      "already_configured": "This air conditioner is already configured.",
+      "reconfigure_successful": "Configuration updated."
+    }
+  }
+}
