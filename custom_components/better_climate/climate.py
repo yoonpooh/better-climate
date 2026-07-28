@@ -636,7 +636,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
 
         step = self._source_temperature_step(new_state)
         expected_targets = self._expected_targets(entity_id)
-        adopt, matched_index = evaluate_source_target_change(
+        adopt, _ = evaluate_source_target_change(
             old_target=(
                 float(old_target) if isinstance(old_target, (int, float)) else None
             ),
@@ -644,11 +644,6 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             expected_targets=expected_targets,
             step=step,
         )
-        pending = self._expected_source_temperatures.get(entity_id)
-        if matched_index is not None and pending is not None:
-            del pending[matched_index]
-            if not pending:
-                self._expected_source_temperatures.pop(entity_id, None)
         if not adopt:
             return False
 

@@ -246,7 +246,7 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
             {"entity_id": COOLING, "temperature": 24.0},
         )
 
-    async def test_delayed_source_event_does_not_change_virtual_target(
+    async def test_duplicate_source_events_do_not_change_virtual_target(
         self,
     ) -> None:
         entity, _services = make_entity()
@@ -273,7 +273,8 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(entity._sync_target_from_event(unchanged))
         self.assertEqual(len(entity._expected_source_temperatures[COOLING]), 1)
         self.assertFalse(entity._sync_target_from_event(expected))
-        self.assertNotIn(COOLING, entity._expected_source_temperatures)
+        self.assertFalse(entity._sync_target_from_event(expected))
+        self.assertEqual(len(entity._expected_source_temperatures[COOLING]), 1)
         self.assertEqual(entity.target_temperature, 24)
 
     async def test_ceiling_fan_follows_hvac_mode_and_ignores_idle(self) -> None:
