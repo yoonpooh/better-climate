@@ -9,7 +9,11 @@ from unittest.mock import patch
 
 try:
     from homeassistant.components.climate.const import HVACMode
-    from homeassistant.components.fan import FanEntityFeature
+    from homeassistant.components.fan import (
+        ATTR_PERCENTAGE,
+        ATTR_PERCENTAGE_STEP,
+        FanEntityFeature,
+    )
     from homeassistant.const import ATTR_SUPPORTED_FEATURES
     from homeassistant.core import Event, State
     from homeassistant.exceptions import HomeAssistantError
@@ -75,6 +79,8 @@ def make_entity(
     fan_state: str | None = None,
     fan_direction: str = "forward",
     fan_supports_direction: bool = True,
+    fan_percentage: int | None = None,
+    fan_percentage_step: float = 25,
 ) -> tuple[BetterClimate, FakeServices]:
     """Create a Better Climate entity with in-memory sources."""
     services = FakeServices()
@@ -84,14 +90,26 @@ def make_entity(
         SENSOR: State(SENSOR, sensor_state),
     }
     if fan_state is not None:
+        features = (
+            FanEntityFeature.DIRECTION
+            if fan_supports_direction
+            else FanEntityFeature(0)
+        )
+        fan_attributes = {"direction": fan_direction}
+        if fan_percentage is not None:
+            features |= FanEntityFeature.SET_SPEED
+            fan_attributes.update(
+                {
+                    ATTR_PERCENTAGE: fan_percentage,
+                    ATTR_PERCENTAGE_STEP: fan_percentage_step,
+                }
+            )
         states[FAN] = State(
             FAN,
             fan_state,
             {
-                "direction": fan_direction,
-                ATTR_SUPPORTED_FEATURES: int(FanEntityFeature.DIRECTION)
-                if fan_supports_direction
-                else 0,
+                **fan_attributes,
+                ATTR_SUPPORTED_FEATURES: int(features),
             },
         )
     data = {
@@ -334,6 +352,105 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(entity._fan_owned)
 
+    async def test_variable_speed_fan_follows_cooling_temperature_difference(
+        self,
+    ) -> None:
+        for room_temperature, expected_percentage in (
+            ("23", 25),
+            ("24.5", 25),
+            ("24.6", 50),
+            ("27", 100),
+        ):
+            with self.subTest(room_temperature=room_temperature):
+                entity, services = make_entity(
+                    sensor_state=room_temperature,
+                    fan_state="off",
+                    fan_percentage=25,
+                )
+
+                await entity._async_sync_ceiling_fan(HVACMode.COOL)
+
+                self.assertEqual(
+                    services.calls[-1],
+                    (
+                        "fan",
+                        "turn_on",
+                        {"entity_id": FAN, ATTR_PERCENTAGE: expected_percentage},
+                        True,
+                    ),
+                )
+                entity._cancel_ceiling_fan_retry()
+
+    async def test_variable_speed_fan_follows_heating_temperature_difference(
+        self,
+    ) -> None:
+        for room_temperature, expected_percentage in (
+            ("25", 25),
+            ("23.5", 25),
+            ("23.4", 50),
+            ("20", 100),
+        ):
+            with self.subTest(room_temperature=room_temperature):
+                entity, services = make_entity(
+                    sensor_state=room_temperature,
+                    fan_state="off",
+                    fan_direction="reverse",
+                    fan_percentage=25,
+                )
+
+                await entity._async_sync_ceiling_fan(HVACMode.HEAT)
+
+                self.assertEqual(
+                    services.calls[-1],
+                    (
+                        "fan",
+                        "turn_on",
+                        {"entity_id": FAN, ATTR_PERCENTAGE: expected_percentage},
+                        True,
+                    ),
+                )
+                entity._cancel_ceiling_fan_retry()
+
+    async def test_variable_speed_fan_only_sends_changed_speed(self) -> None:
+        entity, services = make_entity(
+            cooling_state=HVACMode.COOL,
+            sensor_state="24.5",
+            fan_state="on",
+            fan_percentage=25,
+        )
+
+        await entity._async_sync_ceiling_fan(HVACMode.COOL)
+        self.assertEqual(services.calls, [])
+
+        entity.hass.states._states[SENSOR] = State(SENSOR, "24.6")
+        await entity._async_sync_ceiling_fan(HVACMode.COOL)
+        self.assertEqual(
+            services.calls,
+            [
+                (
+                    "fan",
+                    "set_percentage",
+                    {"entity_id": FAN, ATTR_PERCENTAGE: 50},
+                    True,
+                )
+            ],
+        )
+
+        entity.hass.states._states[FAN] = State(
+            FAN,
+            "on",
+            {
+                "direction": "forward",
+                ATTR_PERCENTAGE: 50,
+                ATTR_PERCENTAGE_STEP: 25,
+                ATTR_SUPPORTED_FEATURES: int(
+                    FanEntityFeature.DIRECTION | FanEntityFeature.SET_SPEED
+                ),
+            },
+        )
+        await entity._async_sync_ceiling_fan(HVACMode.COOL)
+        self.assertEqual(len(services.calls), 1)
+
     async def test_ceiling_fan_reverses_for_heat_and_turns_off_with_hvac(
         self,
     ) -> None:
@@ -408,7 +525,7 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
             fan_state="off",
             fan_direction="forward",
         )
-        entity._ceiling_fan_mode = HVACMode.COOL
+        entity._ceiling_fan_target = (HVACMode.COOL, None)
         entity._ceiling_fan_retry_used = True
         tasks = []
         entity.hass.async_create_task = tasks.append

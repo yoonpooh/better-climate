@@ -6,7 +6,7 @@ import asyncio
 import logging
 from collections import deque
 from collections.abc import Callable
-from math import floor, isfinite
+from math import ceil, floor, isfinite
 from time import monotonic
 
 from homeassistant.components.climate import ClimateEntity
@@ -21,9 +21,12 @@ from homeassistant.components.climate.const import (
 )
 from homeassistant.components.fan import (
     ATTR_DIRECTION,
+    ATTR_PERCENTAGE,
+    ATTR_PERCENTAGE_STEP,
     DIRECTION_FORWARD,
     DIRECTION_REVERSE,
     SERVICE_SET_DIRECTION,
+    SERVICE_SET_PERCENTAGE,
     SERVICE_TURN_OFF,
     SERVICE_TURN_ON,
     FanEntityFeature,
@@ -119,7 +122,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         self._last_requested_temperature: float | None = None
         self._expected_source_temperatures: dict[str, deque[tuple[float, float]]] = {}
         self._fan_owned = False
-        self._ceiling_fan_mode: HVACMode | None = None
+        self._ceiling_fan_target: tuple[HVACMode, int | None] | None = None
         self._ceiling_fan_retry_used = False
         self._ceiling_fan_retry_timer: Callable[[], None] | None = None
         self._pending_timer: Callable[[], None] | None = None
@@ -605,7 +608,9 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             old_state = event.data["old_state"]
             new_state = event.data["new_state"]
             if not self._is_available(old_state) and self._is_available(new_state):
-                self.hass.async_create_task(self._async_sync_ceiling_fan(retry=True))
+                self._cancel_ceiling_fan_retry()
+                self._ceiling_fan_retry_used = False
+                self.hass.async_create_task(self._async_sync_ceiling_fan())
             return
         target_changed = self._sync_target_from_event(event)
         self.async_write_ha_state()
@@ -783,6 +788,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 self._heating_required = heating_result.heating_required
                 command_temperature = heating_result.command_temperature
             self.async_write_ha_state()
+            await self._async_sync_ceiling_fan(mode)
 
             current_command = source.attributes.get(ATTR_TEMPERATURE)
             source_step = self._source_temperature_step(source)
@@ -865,21 +871,27 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             mode = self._ceiling_fan_hvac_mode()
         if mode is None:
             return
+
+        fan = self.hass.states.get(self._ceiling_fan_entity)
+        percentage = self._ceiling_fan_percentage(mode, fan)
+        target = (mode, percentage)
         if retry:
             self._cancel_ceiling_fan_retry()
-            if mode != self._ceiling_fan_mode or self._ceiling_fan_hvac_mode() != mode:
+            if (
+                target != self._ceiling_fan_target
+                or self._ceiling_fan_hvac_mode() != mode
+            ):
                 return
             self._ceiling_fan_retry_used = True
-        elif mode != self._ceiling_fan_mode:
+        elif target != self._ceiling_fan_target:
             self._cancel_ceiling_fan_retry()
-            self._ceiling_fan_mode = mode
+            self._ceiling_fan_target = target
             self._ceiling_fan_retry_used = False
 
         if mode == HVACMode.OFF and not self._fan_owned:
             self._cancel_ceiling_fan_retry()
             return
 
-        fan = self.hass.states.get(self._ceiling_fan_entity)
         if fan is None or not self._is_available(fan):
             if not retry:
                 self._set_ceiling_fan_retry(mode)
@@ -897,11 +909,15 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             & FanEntityFeature.DIRECTION
         ):
             direction = None
+        percentage_matches = percentage is None or self._fan_percentage_matches(
+            fan, percentage
+        )
         matches = (
             fan.state == STATE_OFF
             if mode == HVACMode.OFF
             else fan.state == STATE_ON
             and (direction is None or fan.attributes.get(ATTR_DIRECTION) == direction)
+            and percentage_matches
         )
         if matches:
             if mode == HVACMode.OFF:
@@ -941,13 +957,26 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                     blocking=True,
                 )
             if fan.state != STATE_ON:
+                data = {"entity_id": self._ceiling_fan_entity}
+                if percentage is not None:
+                    data[ATTR_PERCENTAGE] = percentage
                 await self.hass.services.async_call(
                     FAN_DOMAIN,
                     SERVICE_TURN_ON,
-                    {"entity_id": self._ceiling_fan_entity},
+                    data,
                     blocking=True,
                 )
                 self._fan_owned = True
+            elif not percentage_matches:
+                await self.hass.services.async_call(
+                    FAN_DOMAIN,
+                    SERVICE_SET_PERCENTAGE,
+                    {
+                        "entity_id": self._ceiling_fan_entity,
+                        ATTR_PERCENTAGE: percentage,
+                    },
+                    blocking=True,
+                )
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning(
                 "Failed to synchronize ceiling fan %s: %s",
@@ -956,6 +985,46 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             )
         if not retry:
             self._set_ceiling_fan_retry(mode)
+
+    def _ceiling_fan_percentage(self, mode: HVACMode, fan: State | None) -> int | None:
+        """Return the fan speed for the current room temperature difference."""
+        room_temperature = self.current_temperature
+        if (
+            fan is None
+            or mode not in (HVACMode.COOL, HVACMode.HEAT)
+            or room_temperature is None
+            or self._target_temperature is None
+            or not (
+                FanEntityFeature(fan.attributes.get(ATTR_SUPPORTED_FEATURES, 0))
+                & FanEntityFeature.SET_SPEED
+            )
+        ):
+            return None
+        try:
+            percentage_step = float(fan.attributes[ATTR_PERCENTAGE_STEP])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not isfinite(percentage_step) or not 0 < percentage_step <= 100:
+            return None
+
+        difference = (
+            room_temperature - self._target_temperature
+            if mode == HVACMode.COOL
+            else self._target_temperature - room_temperature
+        )
+        level = 1 if difference <= 0.5 else ceil(difference / 0.5)
+        speed_count = max(1, round(100 / percentage_step))
+        return round(min(level, speed_count) * 100 / speed_count)
+
+    @staticmethod
+    def _fan_percentage_matches(fan: State, percentage: int) -> bool:
+        current = fan.attributes.get(ATTR_PERCENTAGE)
+        step = fan.attributes.get(ATTR_PERCENTAGE_STEP)
+        return (
+            isinstance(current, (int, float))
+            and isinstance(step, (int, float))
+            and abs(float(current) - percentage) < float(step) / 2
+        )
 
     def _ceiling_fan_hvac_mode(self) -> HVACMode | None:
         """Return an explicit active or fully-off mode, preserving unknown states."""

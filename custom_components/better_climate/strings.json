@@ -3,29 +3,29 @@
     "step": {
       "user": {
         "title": "Set up Better Climate",
-        "description": "Coordinate cooling and optional heating using an external room temperature sensor.",
+        "description": "Control cooling, optional heating, and a connected fan using a room temperature sensor.",
         "data": {
           "name": "Name",
-          "cooling_entity": "Air conditioner",
-          "heating_entity": "Boiler (optional)",
-          "fan": "Fan (optional)",
+          "cooling_entity": "Cooling device",
+          "heating_entity": "Heating device (optional)",
+          "fan": "Connected fan (optional)",
           "temperature_sensor": "Room temperature sensor",
-          "hysteresis": "Room temperature hysteresis",
-          "force_offset": "Source force offset",
+          "hysteresis": "Temperature tolerance",
+          "force_offset": "Device target offset",
           "min_command_interval": "Minimum command interval"
         }
       },
       "reconfigure": {
         "title": "Reconfigure Better Climate",
-        "description": "Update the climate sources, sensor, and temperature-control settings.",
+        "description": "Update connected devices, the room temperature sensor, and temperature-control settings.",
         "data": {
           "name": "Name",
-          "cooling_entity": "Air conditioner",
-          "heating_entity": "Boiler (optional)",
-          "fan": "Fan (optional)",
+          "cooling_entity": "Cooling device",
+          "heating_entity": "Heating device (optional)",
+          "fan": "Connected fan (optional)",
           "temperature_sensor": "Room temperature sensor",
-          "hysteresis": "Room temperature hysteresis",
-          "force_offset": "Source force offset",
+          "hysteresis": "Temperature tolerance",
+          "force_offset": "Device target offset",
           "min_command_interval": "Minimum command interval"
         }
       }
