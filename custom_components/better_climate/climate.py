@@ -78,6 +78,7 @@ from .control import (
 
 EXPECTED_TARGET_TTL = 120
 MAX_EXPECTED_TARGETS = 8
+ATTR_FAN_OWNED = "fan_owned"
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -147,6 +148,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 self._target_temperature = self._normalize_target(
                     float(restored_target)
                 )
+            self._fan_owned = restored.attributes.get(ATTR_FAN_OWNED) is True
 
         self._ensure_target_temperature()
 
@@ -362,6 +364,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             "cooling_source": self._cooling_entity,
             "heating_source": self._heating_entity,
             "fan": self._ceiling_fan_entity,
+            ATTR_FAN_OWNED: self._fan_owned,
             "temperature_sensor": self._sensor_entity,
             "cooling_source_hvac_mode": self._state_value(self._cooling_source),
             "heating_source_hvac_mode": self._state_value(self._heating_source),

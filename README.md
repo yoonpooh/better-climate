@@ -108,7 +108,7 @@ after saving.
 - Turning off Better Climate attempts to turn off every configured source.
 - Invalid or unavailable sensor readings stop external correction and restore
   the virtual target to the active source.
-- A restored entity keeps its last target and last active mode.
+- A restored entity keeps its last target, active mode, and fan ownership.
 
 ## Development
 

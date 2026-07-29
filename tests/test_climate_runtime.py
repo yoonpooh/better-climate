@@ -5,7 +5,7 @@ import unittest
 from collections import deque
 from time import monotonic
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 try:
     from homeassistant.components.climate.const import HVACMode
@@ -20,7 +20,7 @@ try:
 except ModuleNotFoundError as err:
     raise unittest.SkipTest("Home Assistant is not installed") from err
 
-from custom_components.better_climate.climate import BetterClimate
+from custom_components.better_climate.climate import ATTR_FAN_OWNED, BetterClimate
 from custom_components.better_climate.const import (
     CONF_COOLING_ENTITY,
     CONF_FAN,
@@ -141,6 +141,38 @@ def make_entity(
 
 class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
     """Verify safety behavior around the pure controller."""
+
+    async def test_fan_ownership_survives_entity_restoration(self) -> None:
+        entity, services = make_entity(fan_state="on")
+        entity.async_get_last_state = AsyncMock(
+            return_value=State(
+                "climate.room",
+                HVACMode.OFF,
+                {
+                    ATTR_FAN_OWNED: True,
+                    "last_active_mode": HVACMode.COOL,
+                    "temperature": 24,
+                },
+            )
+        )
+        entity.async_on_remove = lambda _remove: None
+        entity.hass.async_create_task = lambda coro: coro.close()
+
+        with patch(
+            "custom_components.better_climate.climate.async_track_state_change_event",
+            return_value=lambda: None,
+        ):
+            await entity.async_added_to_hass()
+
+        self.assertTrue(entity._fan_owned)
+        self.assertTrue(entity.extra_state_attributes[ATTR_FAN_OWNED])
+
+        await entity._async_sync_ceiling_fan(HVACMode.OFF)
+
+        self.assertEqual(
+            services.calls,
+            [("fan", "turn_off", {"entity_id": FAN}, True)],
+        )
 
     async def test_sensor_failure_restores_virtual_target(self) -> None:
         entity, services = make_entity(
