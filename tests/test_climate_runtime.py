@@ -277,6 +277,24 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(entity._expected_source_temperatures[COOLING]), 1)
         self.assertEqual(entity.target_temperature, 24)
 
+    async def test_self_initiated_mode_change_keeps_virtual_target(self) -> None:
+        entity, _services = make_entity()
+        event = Event(
+            "state_changed",
+            {
+                "entity_id": COOLING,
+                "old_state": climate_state(COOLING, HVACMode.OFF, temperature=None),
+                "new_state": climate_state(COOLING, HVACMode.COOL, temperature=25.5),
+            },
+        )
+
+        async with entity._transition_lock:
+            self.assertFalse(entity._sync_target_from_event(event))
+        self.assertEqual(entity.target_temperature, 24)
+
+        self.assertTrue(entity._sync_target_from_event(event))
+        self.assertEqual(entity.target_temperature, 25.5)
+
     async def test_ceiling_fan_follows_hvac_mode_and_ignores_idle(self) -> None:
         entity, services = make_entity(fan_state="off", fan_direction="reverse")
 

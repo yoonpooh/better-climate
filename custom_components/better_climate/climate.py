@@ -626,6 +626,8 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         new_state = event.data["new_state"]
         if old_state is None or new_state is None:
             return False
+        if self._transition_lock.locked() and old_state.state != new_state.state:
+            return False
         old_target = old_state.attributes.get(ATTR_TEMPERATURE)
         new_target = new_state.attributes.get(ATTR_TEMPERATURE)
         if not isinstance(new_target, (int, float)):
