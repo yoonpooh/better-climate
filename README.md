@@ -90,6 +90,11 @@ Go to **Settings > Devices & services > Add integration**, search for
 
 The resulting entity is cooling-only when no boiler is selected.
 
+To edit an existing configuration, open **Settings > Devices & services >
+Better Climate**, open the top-right menu for the configuration entry, and
+select **Reconfigure**. Existing values are prefilled and the entry reloads
+after saving.
+
 ## Safety Behavior
 
 - Cooling and heating are mutually exclusive.

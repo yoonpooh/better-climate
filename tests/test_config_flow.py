@@ -2,6 +2,7 @@
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 try:
     from homeassistant.components.climate.const import HVACMode
@@ -13,6 +14,9 @@ from custom_components.better_climate.config_flow import BetterClimateConfigFlow
 from custom_components.better_climate.const import (
     CONF_COOLING_ENTITY,
     CONF_FAN,
+    CONF_FORCE_OFFSET,
+    CONF_HYSTERESIS,
+    CONF_MIN_COMMAND_INTERVAL,
     CONF_TEMPERATURE_SENSOR,
 )
 
@@ -47,3 +51,39 @@ class ConfigFlowValidationTest(unittest.TestCase):
         }
 
         self.assertEqual(BetterClimateConfigFlow._validate(flow, data), {})
+
+
+class ConfigFlowReconfigureTest(unittest.IsolatedAsyncioTestCase):
+    """Verify an existing configuration can be replaced and reloaded."""
+
+    async def test_reconfigure_updates_entry_data_and_reloads(self) -> None:
+        entry = SimpleNamespace(data={"name": "Old"})
+        updated = {
+            "name": "Living room",
+            CONF_COOLING_ENTITY: COOLING,
+            CONF_TEMPERATURE_SENSOR: SENSOR,
+            CONF_FAN: FAN,
+            CONF_HYSTERESIS: 0.3,
+            CONF_FORCE_OFFSET: 0.5,
+            CONF_MIN_COMMAND_INTERVAL: 30,
+        }
+        result = {"type": "abort", "reason": "reconfigure_successful"}
+        flow = SimpleNamespace(
+            _get_reconfigure_entry=Mock(return_value=entry),
+            _validate=Mock(return_value={}),
+            async_set_unique_id=AsyncMock(),
+            _abort_if_unique_id_mismatch=Mock(),
+            async_update_reload_and_abort=Mock(return_value=result),
+        )
+
+        self.assertEqual(
+            await BetterClimateConfigFlow.async_step_reconfigure(flow, updated),
+            result,
+        )
+        flow.async_set_unique_id.assert_awaited_once_with(COOLING)
+        flow._abort_if_unique_id_mismatch.assert_called_once_with()
+        flow.async_update_reload_and_abort.assert_called_once_with(
+            entry,
+            title="Living room",
+            data=updated,
+        )

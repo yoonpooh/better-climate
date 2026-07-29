@@ -16,8 +16,8 @@
         }
       },
       "reconfigure": {
-        "title": "Better Climate 재설정",
-        "description": "연결된 기기, 실내 온도 센서 및 온도 제어 설정을 변경합니다.",
+        "title": "Better Climate 기존 설정 수정",
+        "description": "연결된 기기, 실내 온도 센서 및 온도 제어 설정을 수정합니다.",
         "data": {
           "name": "이름",
           "cooling_entity": "냉방 기기",

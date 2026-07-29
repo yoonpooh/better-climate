@@ -16,8 +16,8 @@
         }
       },
       "reconfigure": {
-        "title": "Reconfigure Better Climate",
-        "description": "Update connected devices, the room temperature sensor, and temperature-control settings.",
+        "title": "Edit Better Climate",
+        "description": "Edit the connected devices, room temperature sensor, and temperature-control settings.",
         "data": {
           "name": "Name",
           "cooling_entity": "Cooling device",
