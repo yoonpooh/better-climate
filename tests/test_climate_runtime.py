@@ -332,11 +332,13 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
             services.calls,
             [("fan", "turn_on", {"entity_id": FAN}, True)],
         )
+        self.assertTrue(entity._fan_owned)
 
     async def test_ceiling_fan_reverses_for_heat_and_turns_off_with_hvac(
         self,
     ) -> None:
         entity, services = make_entity(fan_state="on", fan_direction="forward")
+        entity._fan_owned = True
 
         await entity._async_sync_ceiling_fan(HVACMode.HEAT)
         entity.hass.states._states[FAN] = State(FAN, "on", {"direction": "reverse"})
@@ -354,6 +356,13 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 ("fan", "turn_off", {"entity_id": FAN}, True),
             ],
         )
+
+    async def test_manually_started_fan_stays_on_when_hvac_is_off(self) -> None:
+        entity, services = make_entity(fan_state="on")
+
+        await entity._async_sync_ceiling_fan(HVACMode.OFF)
+
+        self.assertEqual(services.calls, [])
 
     async def test_ceiling_fan_stays_on_when_source_state_is_unknown(self) -> None:
         entity, services = make_entity(

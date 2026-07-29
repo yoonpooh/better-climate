@@ -118,6 +118,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         self._last_command_at = 0.0
         self._last_requested_temperature: float | None = None
         self._expected_source_temperatures: dict[str, deque[tuple[float, float]]] = {}
+        self._fan_owned = False
         self._ceiling_fan_mode: HVACMode | None = None
         self._ceiling_fan_retry_used = False
         self._ceiling_fan_retry_timer: Callable[[], None] | None = None
@@ -874,6 +875,10 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             self._ceiling_fan_mode = mode
             self._ceiling_fan_retry_used = False
 
+        if mode == HVACMode.OFF and not self._fan_owned:
+            self._cancel_ceiling_fan_retry()
+            return
+
         fan = self.hass.states.get(self._ceiling_fan_entity)
         if fan is None or not self._is_available(fan):
             if not retry:
@@ -899,6 +904,8 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             and (direction is None or fan.attributes.get(ATTR_DIRECTION) == direction)
         )
         if matches:
+            if mode == HVACMode.OFF:
+                self._fan_owned = False
             self._cancel_ceiling_fan_retry()
             return
         if not retry and (
@@ -915,6 +922,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                         {"entity_id": self._ceiling_fan_entity},
                         blocking=True,
                     )
+                self._fan_owned = False
                 return
             if mode not in (HVACMode.COOL, HVACMode.HEAT):
                 return
@@ -939,6 +947,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                     {"entity_id": self._ceiling_fan_entity},
                     blocking=True,
                 )
+                self._fan_owned = True
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning(
                 "Failed to synchronize ceiling fan %s: %s",
