@@ -20,7 +20,11 @@ try:
 except ModuleNotFoundError as err:
     raise unittest.SkipTest("Home Assistant is not installed") from err
 
-from custom_components.better_climate.climate import ATTR_FAN_OWNED, BetterClimate
+from custom_components.better_climate.climate import (
+    ATTR_FAN_MANUAL_OFF_MODE,
+    ATTR_FAN_OWNED,
+    BetterClimate,
+)
 from custom_components.better_climate.const import (
     CONF_COOLING_ENTITY,
     CONF_FAN,
@@ -173,6 +177,35 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
             services.calls,
             [("fan", "turn_off", {"entity_id": FAN}, True)],
         )
+
+    async def test_manual_fan_off_survives_entity_restoration(self) -> None:
+        entity, services = make_entity(
+            cooling_state=HVACMode.COOL,
+            fan_state="off",
+        )
+        entity.async_get_last_state = AsyncMock(
+            return_value=State(
+                "climate.room",
+                HVACMode.COOL,
+                {
+                    ATTR_FAN_MANUAL_OFF_MODE: HVACMode.COOL,
+                    "temperature": 24,
+                },
+            )
+        )
+        entity.async_on_remove = lambda _remove: None
+        entity.hass.async_create_task = lambda coro: coro.close()
+
+        with patch(
+            "custom_components.better_climate.climate.async_track_state_change_event",
+            return_value=lambda: None,
+        ):
+            await entity.async_added_to_hass()
+
+        await entity._async_sync_ceiling_fan(HVACMode.COOL)
+
+        self.assertEqual(services.calls, [])
+        self.assertEqual(entity._fan_manual_off_mode, HVACMode.COOL)
 
     async def test_sensor_failure_restores_virtual_target(self) -> None:
         entity, services = make_entity(
@@ -512,6 +545,42 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await entity._async_sync_ceiling_fan(HVACMode.OFF)
 
         self.assertEqual(services.calls, [])
+
+    async def test_manually_stopped_fan_stays_off_until_next_hvac_session(
+        self,
+    ) -> None:
+        entity, services = make_entity(
+            cooling_state=HVACMode.COOL,
+            fan_state="on",
+        )
+        entity._fan_owned = True
+        old_state = entity.hass.states.get(FAN)
+        new_state = State(FAN, "off")
+        entity.hass.states._states[FAN] = new_state
+
+        entity._async_source_changed(
+            Event(
+                "state_changed",
+                {
+                    "entity_id": FAN,
+                    "old_state": old_state,
+                    "new_state": new_state,
+                },
+            )
+        )
+        await entity._async_sync_ceiling_fan(HVACMode.COOL)
+
+        self.assertEqual(services.calls, [])
+        self.assertFalse(entity._fan_owned)
+        self.assertEqual(entity._fan_manual_off_mode, HVACMode.COOL)
+
+        await entity._async_sync_ceiling_fan(HVACMode.OFF)
+        await entity._async_sync_ceiling_fan(HVACMode.COOL)
+
+        self.assertEqual(
+            services.calls,
+            [("fan", "turn_on", {"entity_id": FAN}, True)],
+        )
 
     async def test_ceiling_fan_stays_on_when_source_state_is_unknown(self) -> None:
         entity, services = make_entity(

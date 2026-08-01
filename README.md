@@ -105,6 +105,7 @@ after saving.
 - Fans without speed control continue to use direction and power control only.
 - A fan that was already running before Better Climate took control is not
   turned off with HVAC.
+- Manually turning off a fan keeps it off until the current HVAC session ends.
 - Turning off Better Climate attempts to turn off every configured source.
 - Invalid or unavailable sensor readings stop external correction and restore
   the virtual target to the active source.

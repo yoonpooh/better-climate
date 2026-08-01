@@ -79,6 +79,7 @@ from .control import (
 EXPECTED_TARGET_TTL = 120
 MAX_EXPECTED_TARGETS = 8
 ATTR_FAN_OWNED = "fan_owned"
+ATTR_FAN_MANUAL_OFF_MODE = "fan_manual_off_mode"
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -123,6 +124,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         self._last_requested_temperature: float | None = None
         self._expected_source_temperatures: dict[str, deque[tuple[float, float]]] = {}
         self._fan_owned = False
+        self._fan_manual_off_mode: HVACMode | None = None
         self._ceiling_fan_target: tuple[HVACMode, int | None] | None = None
         self._ceiling_fan_retry_used = False
         self._ceiling_fan_retry_timer: Callable[[], None] | None = None
@@ -149,6 +151,11 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                     float(restored_target)
                 )
             self._fan_owned = restored.attributes.get(ATTR_FAN_OWNED) is True
+            restored_fan_manual_off_mode = restored.attributes.get(
+                ATTR_FAN_MANUAL_OFF_MODE
+            )
+            if restored_fan_manual_off_mode in (HVACMode.COOL, HVACMode.HEAT):
+                self._fan_manual_off_mode = HVACMode(restored_fan_manual_off_mode)
 
         self._ensure_target_temperature()
 
@@ -365,6 +372,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             "heating_source": self._heating_entity,
             "fan": self._ceiling_fan_entity,
             ATTR_FAN_OWNED: self._fan_owned,
+            ATTR_FAN_MANUAL_OFF_MODE: self._fan_manual_off_mode,
             "temperature_sensor": self._sensor_entity,
             "cooling_source_hvac_mode": self._state_value(self._cooling_source),
             "heating_source_hvac_mode": self._state_value(self._heating_source),
@@ -610,6 +618,22 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         if entity_id == self._ceiling_fan_entity:
             old_state = event.data["old_state"]
             new_state = event.data["new_state"]
+            mode = self._ceiling_fan_hvac_mode()
+            if (
+                old_state is not None
+                and old_state.state == STATE_ON
+                and new_state is not None
+                and new_state.state == STATE_OFF
+                and mode in (HVACMode.COOL, HVACMode.HEAT)
+            ):
+                self._fan_manual_off_mode = mode
+                self._fan_owned = False
+                self._cancel_ceiling_fan_retry()
+                self.async_write_ha_state()
+                return
+            if new_state is not None and new_state.state == STATE_ON:
+                self._fan_manual_off_mode = None
+                self.async_write_ha_state()
             if not self._is_available(old_state) and self._is_available(new_state):
                 self._cancel_ceiling_fan_retry()
                 self._ceiling_fan_retry_used = False
@@ -874,6 +898,13 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             mode = self._ceiling_fan_hvac_mode()
         if mode is None:
             return
+        if mode == HVACMode.OFF:
+            self._fan_manual_off_mode = None
+        elif self._fan_manual_off_mode == mode:
+            self._cancel_ceiling_fan_retry()
+            return
+        else:
+            self._fan_manual_off_mode = None
 
         fan = self.hass.states.get(self._ceiling_fan_entity)
         percentage = self._ceiling_fan_percentage(mode, fan)
