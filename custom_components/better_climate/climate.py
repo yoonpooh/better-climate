@@ -78,6 +78,8 @@ from .control import (
 
 EXPECTED_TARGET_TTL = 120
 MAX_EXPECTED_TARGETS = 8
+FAN_SPEED_STEP = 0.5
+FAN_SPEED_HYSTERESIS = 0.1
 ATTR_FAN_OWNED = "fan_owned"
 ATTR_FAN_MANUAL_OFF_MODE = "fan_manual_off_mode"
 _LOGGER = logging.getLogger(__name__)
@@ -1047,14 +1049,34 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         if not isfinite(percentage_step) or not 0 < percentage_step <= 100:
             return None
 
-        difference = (
+        difference = round(
             room_temperature - self._target_temperature
             if mode == HVACMode.COOL
-            else self._target_temperature - room_temperature
+            else self._target_temperature - room_temperature,
+            3,
         )
-        level = 1 if difference <= 0.5 else ceil(difference / 0.5)
         speed_count = max(1, round(100 / percentage_step))
-        return round(min(level, speed_count) * 100 / speed_count)
+        level = min(
+            1 if difference <= FAN_SPEED_STEP else ceil(difference / FAN_SPEED_STEP),
+            speed_count,
+        )
+        previous = self._ceiling_fan_target
+        if previous is not None and previous[0] == mode and previous[1] is not None:
+            previous_level = round(previous[1] * speed_count / 100)
+            if 1 <= previous_level <= speed_count and (
+                (
+                    level > previous_level
+                    and difference
+                    <= previous_level * FAN_SPEED_STEP + FAN_SPEED_HYSTERESIS
+                )
+                or (
+                    level < previous_level
+                    and difference
+                    > (previous_level - 1) * FAN_SPEED_STEP - FAN_SPEED_HYSTERESIS
+                )
+            ):
+                level = previous_level
+        return round(level * 100 / speed_count)
 
     @staticmethod
     def _fan_percentage_matches(fan: State, percentage: int) -> bool:

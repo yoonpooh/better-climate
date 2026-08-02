@@ -102,6 +102,8 @@ after saving.
   when the HVAC mode turns off. Directional ceiling fans run forward for cooling
   and reverse for heating. Variable-speed fans use their lowest step within
   `0.5 °C` of the target and increase one step for each additional `0.5 °C`.
+  A `0.1 °C` speed hysteresis prevents sensor jitter from repeatedly changing
+  adjacent fan levels.
 - Fans without speed control continue to use direction and power control only.
 - A fan that is already running when a new Better Climate session starts is
   adopted by that session and turns off with HVAC. Startup restoration alone

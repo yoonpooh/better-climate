@@ -487,7 +487,7 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await entity._async_sync_ceiling_fan(HVACMode.COOL)
         self.assertEqual(services.calls, [])
 
-        entity.hass.states._states[SENSOR] = State(SENSOR, "24.6")
+        entity.hass.states._states[SENSOR] = State(SENSOR, "24.7")
         await entity._async_sync_ceiling_fan(HVACMode.COOL)
         self.assertEqual(
             services.calls,
@@ -515,6 +515,45 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         await entity._async_sync_ceiling_fan(HVACMode.COOL)
         self.assertEqual(len(services.calls), 1)
+
+    async def test_variable_speed_fan_ignores_temperature_boundary_chatter(
+        self,
+    ) -> None:
+        entity, services = make_entity(
+            cooling_state=HVACMode.COOL,
+            sensor_state="24.5",
+            fan_state="on",
+            fan_percentage=25,
+        )
+
+        await entity._async_sync_ceiling_fan(HVACMode.COOL)
+        entity.hass.states._states[SENSOR] = State(SENSOR, "24.6")
+        await entity._async_sync_ceiling_fan(HVACMode.COOL)
+        self.assertEqual(services.calls, [])
+
+        entity.hass.states._states[SENSOR] = State(SENSOR, "24.7")
+        await entity._async_sync_ceiling_fan(HVACMode.COOL)
+        self.assertEqual(services.calls[-1][2][ATTR_PERCENTAGE], 50)
+        entity.hass.states._states[FAN] = State(
+            FAN,
+            "on",
+            {
+                "direction": "forward",
+                ATTR_PERCENTAGE: 50,
+                ATTR_PERCENTAGE_STEP: 25,
+                ATTR_SUPPORTED_FEATURES: int(
+                    FanEntityFeature.DIRECTION | FanEntityFeature.SET_SPEED
+                ),
+            },
+        )
+
+        entity.hass.states._states[SENSOR] = State(SENSOR, "24.6")
+        await entity._async_sync_ceiling_fan(HVACMode.COOL)
+        self.assertEqual(len(services.calls), 1)
+
+        entity.hass.states._states[SENSOR] = State(SENSOR, "24.4")
+        await entity._async_sync_ceiling_fan(HVACMode.COOL)
+        self.assertEqual(services.calls[-1][2][ATTR_PERCENTAGE], 25)
 
     async def test_ceiling_fan_reverses_for_heat_and_turns_off_with_hvac(
         self,
