@@ -29,8 +29,6 @@ from homeassistant.components.fan import (
     DIRECTION_REVERSE,
     SERVICE_SET_DIRECTION,
     SERVICE_SET_PERCENTAGE,
-    SERVICE_TURN_OFF,
-    SERVICE_TURN_ON,
     FanEntityFeature,
 )
 from homeassistant.components.fan import (
@@ -41,6 +39,8 @@ from homeassistant.const import (
     ATTR_SUPPORTED_FEATURES,
     ATTR_TEMPERATURE,
     CONF_NAME,
+    SERVICE_TURN_OFF,
+    SERVICE_TURN_ON,
     STATE_OFF,
     STATE_ON,
     STATE_UNAVAILABLE,
@@ -648,7 +648,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         errors = []
         for entity_id in entities:
             try:
-                await self._async_turn_source_off(entity_id)
+                await self._async_turn_source_off(entity_id, force=True)
             except Exception as err:  # noqa: BLE001
                 # Continue so one failed source cannot leave the other running.
                 errors.append(f"{entity_id}: {err}")
@@ -659,10 +659,12 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 "Failed to turn off all climate sources: " + "; ".join(errors)
             )
 
-    async def _async_turn_source_off(self, entity_id: str) -> None:
+    async def _async_turn_source_off(
+        self, entity_id: str, *, force: bool = False
+    ) -> None:
         """Turn off a source and confirm it is off before continuing."""
         state = self.hass.states.get(entity_id)
-        if state is not None and state.state == HVACMode.OFF:
+        if not force and state is not None and state.state == HVACMode.OFF:
             return
 
         loop = asyncio.get_running_loop()
@@ -813,6 +815,33 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         """Set and record a requested source mode."""
         self._expect_source_mode(entity_id, mode)
         try:
+            state = self.hass.states.get(entity_id)
+            supported_features = (
+                0
+                if state is None
+                else int(state.attributes.get(ATTR_SUPPORTED_FEATURES, 0))
+            )
+            if (
+                mode != HVACMode.OFF
+                and state is not None
+                and state.state == HVACMode.OFF
+                and supported_features & ClimateEntityFeature.TURN_ON
+            ):
+                await self._async_turn_source_on(entity_id)
+                state = self.hass.states.get(entity_id)
+                if state is not None and state.state == mode:
+                    return
+            if (
+                mode == HVACMode.OFF
+                and supported_features & ClimateEntityFeature.TURN_OFF
+            ):
+                await self.hass.services.async_call(
+                    "climate",
+                    SERVICE_TURN_OFF,
+                    {"entity_id": entity_id},
+                    blocking=True,
+                )
+                return
             await self.hass.services.async_call(
                 "climate",
                 "set_hvac_mode",
@@ -822,6 +851,45 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         except Exception:
             self._expected_source_modes.pop(entity_id, None)
             raise
+
+    async def _async_turn_source_on(self, entity_id: str) -> None:
+        """Power on a source and wait until it leaves the off state."""
+        loop = asyncio.get_running_loop()
+        started = loop.create_future()
+
+        @callback
+        def _source_changed(event: Event[EventStateChangedData]) -> None:
+            new_state = event.data["new_state"]
+            if (
+                new_state is not None
+                and new_state.state
+                not in (HVACMode.OFF, STATE_UNKNOWN, STATE_UNAVAILABLE)
+                and not started.done()
+            ):
+                started.set_result(None)
+
+        unsubscribe = async_track_state_change_event(
+            self.hass, [entity_id], _source_changed
+        )
+        try:
+            await self.hass.services.async_call(
+                "climate",
+                SERVICE_TURN_ON,
+                {"entity_id": entity_id},
+                blocking=True,
+            )
+            state = self.hass.states.get(entity_id)
+            if state is None or state.state in (
+                HVACMode.OFF,
+                STATE_UNKNOWN,
+                STATE_UNAVAILABLE,
+            ):
+                try:
+                    await asyncio.wait_for(started, timeout=10)
+                except TimeoutError as err:
+                    raise HomeAssistantError(f"{entity_id} did not turn on") from err
+        finally:
+            unsubscribe()
 
     def _consume_expected_source_mode(self, entity_id: str, mode: str) -> bool:
         """Return whether a source mode event matches our latest command."""

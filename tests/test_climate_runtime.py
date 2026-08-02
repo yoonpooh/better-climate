@@ -297,8 +297,9 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         calls = []
 
-        async def turn_source_off(entity_id: str) -> None:
+        async def turn_source_off(entity_id: str, *, force: bool = False) -> None:
             calls.append(entity_id)
+            self.assertTrue(force)
             if entity_id == COOLING:
                 raise HomeAssistantError("offline")
 
@@ -308,6 +309,80 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await entity._async_turn_off_locked()
 
         self.assertCountEqual(calls, [COOLING, HEATING])
+
+    async def test_power_services_wrap_source_mode_changes(self) -> None:
+        entity, services = make_entity(cooling_state=HVACMode.OFF)
+        entity.hass.states._states[COOLING] = climate_state(
+            COOLING,
+            HVACMode.OFF,
+            supported_features=int(
+                ClimateEntityFeature.TURN_ON | ClimateEntityFeature.TURN_OFF
+            ),
+        )
+
+        async def call_service(
+            domain: str, service: str, data: dict, *, blocking: bool
+        ) -> None:
+            services.calls.append((domain, service, data, blocking))
+            if service == "turn_on":
+                entity.hass.states._states[COOLING] = climate_state(
+                    COOLING,
+                    "dry",
+                    supported_features=int(
+                        ClimateEntityFeature.TURN_ON | ClimateEntityFeature.TURN_OFF
+                    ),
+                )
+            elif service == "turn_off":
+                entity.hass.states._states[COOLING] = climate_state(
+                    COOLING,
+                    HVACMode.OFF,
+                    supported_features=int(
+                        ClimateEntityFeature.TURN_ON | ClimateEntityFeature.TURN_OFF
+                    ),
+                )
+
+        services.async_call = call_service
+
+        with patch(
+            "custom_components.better_climate.climate.async_track_state_change_event",
+            return_value=lambda: None,
+        ):
+            await entity._async_set_source_mode(COOLING, HVACMode.COOL)
+            await entity._async_turn_source_off(COOLING, force=True)
+
+        self.assertEqual(
+            services.calls,
+            [
+                ("climate", "turn_on", {"entity_id": COOLING}, True),
+                (
+                    "climate",
+                    "set_hvac_mode",
+                    {"entity_id": COOLING, "hvac_mode": HVACMode.COOL},
+                    True,
+                ),
+                ("climate", "turn_off", {"entity_id": COOLING}, True),
+            ],
+        )
+
+    async def test_cached_off_source_is_only_forced_off_explicitly(self) -> None:
+        entity, services = make_entity(cooling_state=HVACMode.OFF)
+        entity.hass.states._states[COOLING] = climate_state(
+            COOLING,
+            HVACMode.OFF,
+            supported_features=int(ClimateEntityFeature.TURN_OFF),
+        )
+
+        with patch(
+            "custom_components.better_climate.climate.async_track_state_change_event",
+            return_value=lambda: None,
+        ):
+            await entity._async_turn_source_off(COOLING)
+            await entity._async_turn_source_off(COOLING, force=True)
+
+        self.assertEqual(
+            services.calls,
+            [("climate", "turn_off", {"entity_id": COOLING}, True)],
+        )
 
     async def test_startup_resolves_dual_active_sources(self) -> None:
         entity, _services = make_entity(
@@ -522,9 +597,7 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         entity._async_reconcile = AsyncMock()
 
         await entity._async_sync_source(COOLING)
-        entity.hass.states._states[COOLING] = climate_state(
-            COOLING, HVACMode.OFF
-        )
+        entity.hass.states._states[COOLING] = climate_state(COOLING, HVACMode.OFF)
         await entity._async_sync_source(COOLING)
 
         self.assertEqual(entity.hvac_mode, HVACMode.COOL)

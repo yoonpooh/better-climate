@@ -118,6 +118,8 @@ after saving.
   does not adopt a manually running fan.
 - Manually turning off a fan keeps it off until the current HVAC session ends.
 - Turning off Better Climate attempts to turn off every configured source.
+- Sources with native power controls are powered on before their HVAC mode is
+  selected and use their native power-off service when stopped.
 - Idle powers off the selected cooling or heating source while preserving the
   virtual HVAC mode and connected fan. Demand restarts the selected source.
 - Invalid or unavailable sensor readings stop external correction and restore
