@@ -460,7 +460,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             },
             blocking=True,
         )
-        await self._async_sync_ceiling_fan(HVACMode.COOL)
+        await self._async_sync_ceiling_fan(HVACMode.COOL, adopt=True)
         await self._async_reconcile(force=True)
         self.async_write_ha_state()
 
@@ -488,7 +488,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             },
             blocking=True,
         )
-        await self._async_sync_ceiling_fan(HVACMode.HEAT)
+        await self._async_sync_ceiling_fan(HVACMode.HEAT, adopt=True)
         await self._async_reconcile(force=True)
         self.async_write_ha_state()
 
@@ -889,7 +889,11 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             self._pending_timer = None
 
     async def _async_sync_ceiling_fan(
-        self, mode: HVACMode | None = None, *, retry: bool = False
+        self,
+        mode: HVACMode | None = None,
+        *,
+        retry: bool = False,
+        adopt: bool = False,
     ) -> None:
         """Match the optional ceiling fan to the active HVAC mode."""
         if self._ceiling_fan_entity is None:
@@ -930,6 +934,8 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             if not retry:
                 self._set_ceiling_fan_retry(mode)
             return
+        if adopt and mode in (HVACMode.COOL, HVACMode.HEAT) and fan.state == STATE_ON:
+            self._fan_owned = True
 
         direction = (
             DIRECTION_FORWARD

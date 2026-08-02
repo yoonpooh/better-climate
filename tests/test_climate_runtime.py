@@ -546,6 +546,31 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(services.calls, [])
 
+    async def test_running_fan_is_adopted_by_new_hvac_session(self) -> None:
+        entity, services = make_entity(fan_state="on")
+
+        await entity._async_sync_ceiling_fan(HVACMode.COOL, adopt=True)
+        await entity._async_sync_ceiling_fan(HVACMode.OFF)
+
+        self.assertTrue(entity._ceiling_fan_retry_timer is None)
+        self.assertEqual(
+            services.calls,
+            [("fan", "turn_off", {"entity_id": FAN}, True)],
+        )
+
+    async def test_startup_does_not_adopt_running_fan(self) -> None:
+        entity, services = make_entity(
+            cooling_state=HVACMode.COOL,
+            fan_state="on",
+        )
+        entity._async_reconcile = AsyncMock()
+
+        await entity._async_initialize_control()
+        await entity._async_sync_ceiling_fan(HVACMode.OFF)
+
+        self.assertFalse(entity._fan_owned)
+        self.assertEqual(services.calls, [])
+
     async def test_manually_stopped_fan_stays_off_until_next_hvac_session(
         self,
     ) -> None:

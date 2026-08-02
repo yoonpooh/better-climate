@@ -103,8 +103,9 @@ after saving.
   and reverse for heating. Variable-speed fans use their lowest step within
   `0.5 °C` of the target and increase one step for each additional `0.5 °C`.
 - Fans without speed control continue to use direction and power control only.
-- A fan that was already running before Better Climate took control is not
-  turned off with HVAC.
+- A fan that is already running when a new Better Climate session starts is
+  adopted by that session and turns off with HVAC. Startup restoration alone
+  does not adopt a manually running fan.
 - Manually turning off a fan keeps it off until the current HVAC session ends.
 - Turning off Better Climate attempts to turn off every configured source.
 - Invalid or unavailable sensor readings stop external correction and restore
