@@ -8,7 +8,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 try:
-    from homeassistant.components.climate.const import ClimateEntityFeature, HVACMode
+    from homeassistant.components.climate.const import (
+        ClimateEntityFeature,
+        HVACAction,
+        HVACMode,
+    )
     from homeassistant.components.fan import (
         ATTR_PERCENTAGE,
         ATTR_PERCENTAGE_STEP,
@@ -23,6 +27,7 @@ except ModuleNotFoundError as err:
 from custom_components.better_climate.climate import (
     ATTR_FAN_MANUAL_OFF_MODE,
     ATTR_FAN_OWNED,
+    ATTR_IDLE_SOURCE_MODE,
     BetterClimate,
 )
 from custom_components.better_climate.const import (
@@ -153,6 +158,30 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(entity.target_temperature_low, 22)
         self.assertEqual(entity.target_temperature_high, 25)
+
+    async def test_idle_source_mode_survives_entity_restoration(self) -> None:
+        entity, _services = make_entity()
+        entity.async_get_last_state = AsyncMock(
+            return_value=State(
+                "climate.room",
+                HVACMode.COOL,
+                {
+                    ATTR_IDLE_SOURCE_MODE: HVACMode.COOL,
+                    "temperature": 24,
+                },
+            )
+        )
+        entity.async_on_remove = lambda _remove: None
+        entity.hass.async_create_task = lambda coro: coro.close()
+
+        with patch(
+            "custom_components.better_climate.climate.async_track_state_change_event",
+            return_value=lambda: None,
+        ):
+            await entity.async_added_to_hass()
+
+        self.assertEqual(entity.hvac_mode, HVACMode.COOL)
+        self.assertEqual(entity.hvac_action, HVACAction.IDLE)
 
     async def test_fan_ownership_survives_entity_restoration(self) -> None:
         entity, services = make_entity(fan_state="on")
@@ -322,7 +351,7 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(maximum_active, 1)
 
     async def test_heat_cool_exposes_range_and_retains_cooling(self) -> None:
-        entity, services = make_entity(
+        entity, _services = make_entity(
             cooling_state=HVACMode.COOL,
             sensor_state="25",
             fan_state="on",
@@ -336,20 +365,71 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             entity.supported_features & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
         )
+        entity._async_turn_source_off = AsyncMock()
 
         await entity._async_reconcile(force=True)
 
         self.assertEqual(entity._last_active_mode, HVACMode.COOL)
         self.assertFalse(entity._cooling_required)
-        self.assertIn(
-            (
-                "climate",
-                "set_temperature",
-                {"entity_id": COOLING, "temperature": 25.5},
-                True,
-            ),
-            services.calls,
+        self.assertEqual(entity._idle_source_mode, HVACMode.COOL)
+        entity._async_turn_source_off.assert_awaited_once_with(COOLING)
+
+    async def test_cooling_idle_turns_source_off_but_keeps_virtual_mode(self) -> None:
+        entity, _services = make_entity(
+            cooling_state=HVACMode.COOL,
+            sensor_state="24",
         )
+        entity._async_turn_source_off = AsyncMock()
+
+        await entity._async_reconcile(force=True)
+
+        entity._async_turn_source_off.assert_awaited_once_with(COOLING)
+        self.assertEqual(entity.hvac_mode, HVACMode.COOL)
+        self.assertEqual(entity.hvac_action, HVACAction.IDLE)
+        self.assertEqual(
+            entity.extra_state_attributes[ATTR_IDLE_SOURCE_MODE], HVACMode.COOL
+        )
+
+    async def test_heating_idle_turns_zone_off_but_keeps_virtual_mode(self) -> None:
+        entity, _services = make_entity(
+            heating_state=HVACMode.HEAT,
+            sensor_state="24",
+        )
+        entity._last_active_mode = HVACMode.HEAT
+        entity._last_requested_mode = HVACMode.HEAT
+        entity._async_turn_source_off = AsyncMock()
+
+        await entity._async_reconcile(force=True)
+
+        entity._async_turn_source_off.assert_awaited_once_with(HEATING)
+        self.assertEqual(entity.hvac_mode, HVACMode.HEAT)
+        self.assertEqual(entity.hvac_action, HVACAction.IDLE)
+
+    async def test_demand_restarts_source_after_idle(self) -> None:
+        entity, _services = make_entity(
+            cooling_state=HVACMode.OFF,
+            sensor_state="24.5",
+        )
+        entity._idle_source_mode = HVACMode.COOL
+        entity._async_activate_cooling = AsyncMock()
+
+        await entity._async_reconcile(force=True)
+
+        entity._async_activate_cooling.assert_awaited_once_with(reconcile=False)
+
+    async def test_connected_fan_stays_on_while_source_is_powered_off_idle(
+        self,
+    ) -> None:
+        entity, services = make_entity(
+            cooling_state=HVACMode.OFF,
+            fan_state="on",
+        )
+        entity._idle_source_mode = HVACMode.COOL
+        entity._fan_owned = True
+
+        await entity._async_sync_ceiling_fan()
+
+        self.assertEqual(services.calls, [])
 
     async def test_heat_cool_switches_after_opposite_boundary(self) -> None:
         entity, _services = make_entity(
@@ -367,7 +447,7 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entity.hvac_mode, HVACMode.HEAT_COOL)
 
     async def test_heat_cool_uses_lower_target_for_heating(self) -> None:
-        entity, services = make_entity(
+        entity, _services = make_entity(
             heating_state=HVACMode.HEAT,
             sensor_state="23",
         )
@@ -375,19 +455,13 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         entity._last_active_mode = HVACMode.HEAT
         entity._target_temperature_low = 23
         entity._target_temperature_high = 25
+        entity._async_turn_source_off = AsyncMock()
 
         await entity._async_reconcile(force=True)
 
         self.assertFalse(entity._heating_required)
-        self.assertIn(
-            (
-                "climate",
-                "set_temperature",
-                {"entity_id": HEATING, "temperature": 23.0},
-                True,
-            ),
-            services.calls,
-        )
+        self.assertEqual(entity._idle_source_mode, HVACMode.HEAT)
+        entity._async_turn_source_off.assert_awaited_once_with(HEATING)
 
     async def test_heat_cool_manual_source_mode_exits_range_mode(self) -> None:
         entity, _services = make_entity(cooling_state=HVACMode.COOL)

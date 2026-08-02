@@ -18,7 +18,7 @@ conditioning.
 - External room temperature sensor for both cooling and heating
 - One target for cooling or heating, plus a target range for `heat_cool`
 - Optional boiler support
-- Automatic heat/cool range control that retains the active source in idle
+- Automatic heat/cool range control that retains the selected mode in idle
 - Optional fan coordination, including directional and variable-speed fans
 - Cooling and heating interlock
 - Configurable hysteresis and source offset
@@ -41,19 +41,20 @@ temperature:
 | State | Source target |
 | --- | --- |
 | Cooling required | Internal temperature minus the source offset |
-| Cooling satisfied | Internal temperature plus the source offset |
+| Cooling satisfied | Cooling source off |
 | Heating required | Internal temperature plus the source offset |
-| Heating satisfied | Internal temperature minus the source offset |
+| Heating satisfied | Heating source off |
 
 Hysteresis prevents rapid switching around the target. Changing from cooling to
 heating, or from heating to cooling, turns off and confirms the opposite source
 before enabling the selected source.
 
-When `heat_cool` is selected, the lower target controls heating and the upper
-target controls cooling. Reaching a boundary keeps the selected source enabled
-in its native idle state using the same source-target offset. The source changes
-only after the room crosses the opposite boundary plus hysteresis. The initial
-range is `22 °C` to `25 °C`; user changes are restored after restart.
+When demand is satisfied, Better Climate powers off the selected cooling or
+heating source while keeping the virtual mode in `idle`. It restores that source
+when the room crosses the target plus hysteresis. In `heat_cool`, the selected
+cooling or heating mode is retained while idle and changes only after the room
+crosses the opposite boundary plus hysteresis. The initial range is `22 °C` to
+`25 °C`; user changes are restored after restart.
 
 ## Requirements
 
@@ -91,7 +92,7 @@ Go to **Settings > Devices & services > Add integration**, search for
 | Boiler | Climate entity used for heating | Optional |
 | Fan | Kept on with HVAC; directional fans follow cooling/heating and variable-speed fans increase one step per 0.5 °C of demand | Optional |
 | Room temperature sensor | External room temperature | Required |
-| Room temperature hysteresis | Difference required before changing demand | `0.3 °C` |
+| Room temperature hysteresis | Difference required before changing demand | `0.5 °C` |
 | Source force offset | Adjustment applied around the source temperature | `0.5 °C` |
 | Minimum command interval | Minimum time between source target commands | `30 s` |
 
@@ -117,8 +118,8 @@ after saving.
   does not adopt a manually running fan.
 - Manually turning off a fan keeps it off until the current HVAC session ends.
 - Turning off Better Climate attempts to turn off every configured source.
-- Heat/cool mode retains the last concrete source inside the configured range,
-  so its native thermostat and connected fan remain idle without mode cycling.
+- Idle powers off the selected cooling or heating source while preserving the
+  virtual HVAC mode and connected fan. Demand restarts the selected source.
 - Invalid or unavailable sensor readings stop external correction and restore
   the virtual target to the active source.
 - A restored entity keeps its last target, active mode, and fan ownership.
