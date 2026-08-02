@@ -183,6 +183,27 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entity.hvac_mode, HVACMode.COOL)
         self.assertEqual(entity.hvac_action, HVACAction.IDLE)
 
+    async def test_active_restored_mode_migrates_to_mode_marker(self) -> None:
+        entity, _services = make_entity()
+        entity.async_get_last_state = AsyncMock(
+            return_value=State(
+                "climate.room",
+                HVACMode.COOL,
+                {"temperature": 24},
+            )
+        )
+        entity.async_on_remove = lambda _remove: None
+        entity.hass.async_create_task = lambda coro: coro.close()
+
+        with patch(
+            "custom_components.better_climate.climate.async_track_state_change_event",
+            return_value=lambda: None,
+        ):
+            await entity.async_added_to_hass()
+
+        self.assertEqual(entity._idle_source_mode, HVACMode.COOL)
+        self.assertEqual(entity.hvac_mode, HVACMode.COOL)
+
     async def test_fan_ownership_survives_entity_restoration(self) -> None:
         entity, services = make_entity(fan_state="on")
         entity.async_get_last_state = AsyncMock(
@@ -513,6 +534,14 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         entity, _services = make_entity(cooling_state=HVACMode.COOL)
 
         await entity._async_activate_cooling_locked()
+
+        self.assertEqual(entity._idle_source_mode, HVACMode.COOL)
+
+    async def test_startup_records_active_source_mode(self) -> None:
+        entity, _services = make_entity(cooling_state=HVACMode.COOL)
+        entity._async_reconcile = AsyncMock()
+
+        await entity._async_initialize_control()
 
         self.assertEqual(entity._idle_source_mode, HVACMode.COOL)
 

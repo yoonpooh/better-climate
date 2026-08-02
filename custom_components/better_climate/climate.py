@@ -194,6 +194,8 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             restored_idle_mode = restored.attributes.get(ATTR_IDLE_SOURCE_MODE)
             if restored_idle_mode in (HVACMode.COOL, HVACMode.HEAT):
                 self._idle_source_mode = HVACMode(restored_idle_mode)
+            elif restored.state in (HVACMode.COOL, HVACMode.HEAT):
+                self._idle_source_mode = HVACMode(restored.state)
             self._fan_owned = restored.attributes.get(ATTR_FAN_OWNED) is True
             restored_fan_manual_off_mode = restored.attributes.get(
                 ATTR_FAN_MANUAL_OFF_MODE
@@ -937,8 +939,10 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                     await self._async_turn_source_off(self._heating_entity)
             elif cooling_active:
                 self._last_active_mode = HVACMode.COOL
+                self._idle_source_mode = HVACMode.COOL
             elif heating_active:
                 self._last_active_mode = HVACMode.HEAT
+                self._idle_source_mode = HVACMode.HEAT
             await self._async_sync_ceiling_fan()
             self.async_write_ha_state()
         await self._async_reconcile(force=True)
