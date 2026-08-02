@@ -595,7 +595,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         if self._heating_entity is not None:
             await self._async_turn_source_off(self._heating_entity)
         await self._async_set_source_mode(self._cooling_entity, HVACMode.COOL)
-        self._idle_source_mode = None
+        self._idle_source_mode = HVACMode.COOL
         await self._async_sync_ceiling_fan(HVACMode.COOL, adopt=True)
         self.async_write_ha_state()
 
@@ -617,7 +617,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         self._cooling_required = False
         await self._async_turn_source_off(self._cooling_entity)
         await self._async_set_source_mode(self._heating_entity, HVACMode.HEAT)
-        self._idle_source_mode = None
+        self._idle_source_mode = HVACMode.HEAT
         await self._async_sync_ceiling_fan(HVACMode.HEAT, adopt=True)
         self.async_write_ha_state()
 
@@ -791,11 +791,13 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             return False
         if self._consume_expected_source_mode(entity_id, new_state.state):
             return None
+        mode = HVACMode.COOL if entity_id == self._cooling_entity else HVACMode.HEAT
+        if new_state.state == HVACMode.OFF and self._idle_source_mode == mode:
+            return None
         if not self._heat_cool_enabled or self._transition_lock.locked():
             return False
 
         self._heat_cool_enabled = False
-        mode = HVACMode.COOL if entity_id == self._cooling_entity else HVACMode.HEAT
         self._last_requested_mode = mode
         if new_state.state == mode:
             self._last_active_mode = mode
@@ -1063,7 +1065,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 self._heat_cool_enabled = virtual_mode == HVACMode.HEAT_COOL
                 if self._heat_cool_enabled:
                     self._last_requested_mode = HVACMode.HEAT_COOL
-                self._idle_source_mode = None
+                self._idle_source_mode = mode
                 self.async_write_ha_state()
 
             current_command = source.attributes.get(ATTR_TEMPERATURE)
