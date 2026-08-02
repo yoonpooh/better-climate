@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 try:
-    from homeassistant.components.climate.const import HVACMode
+    from homeassistant.components.climate.const import ClimateEntityFeature, HVACMode
     from homeassistant.components.fan import (
         ATTR_PERCENTAGE,
         ATTR_PERCENTAGE_STEP,
@@ -312,6 +312,106 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(maximum_active, 1)
+
+    async def test_heat_cool_exposes_range_and_retains_cooling(self) -> None:
+        entity, services = make_entity(
+            cooling_state=HVACMode.COOL,
+            sensor_state="25",
+            fan_state="on",
+        )
+        entity._heat_cool_enabled = True
+        entity._target_temperature_low = 23
+        entity._target_temperature_high = 25
+
+        self.assertEqual(entity.hvac_mode, HVACMode.HEAT_COOL)
+        self.assertIn(HVACMode.HEAT_COOL, entity.hvac_modes)
+        self.assertTrue(
+            entity.supported_features & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+        )
+
+        await entity._async_reconcile(force=True)
+
+        self.assertEqual(entity._last_active_mode, HVACMode.COOL)
+        self.assertFalse(entity._cooling_required)
+        self.assertIn(
+            (
+                "climate",
+                "set_temperature",
+                {"entity_id": COOLING, "temperature": 25.5},
+                True,
+            ),
+            services.calls,
+        )
+
+    async def test_heat_cool_switches_after_opposite_boundary(self) -> None:
+        entity, _services = make_entity(
+            cooling_state=HVACMode.COOL,
+            sensor_state="22.7",
+        )
+        entity._heat_cool_enabled = True
+        entity._target_temperature_low = 23
+        entity._target_temperature_high = 25
+        entity._async_activate_heating = AsyncMock()
+
+        await entity._async_reconcile(force=True)
+
+        entity._async_activate_heating.assert_awaited_once_with(reconcile=False)
+        self.assertEqual(entity.hvac_mode, HVACMode.HEAT_COOL)
+
+    async def test_heat_cool_uses_lower_target_for_heating(self) -> None:
+        entity, services = make_entity(
+            heating_state=HVACMode.HEAT,
+            sensor_state="23",
+        )
+        entity._heat_cool_enabled = True
+        entity._last_active_mode = HVACMode.HEAT
+        entity._target_temperature_low = 23
+        entity._target_temperature_high = 25
+
+        await entity._async_reconcile(force=True)
+
+        self.assertFalse(entity._heating_required)
+        self.assertIn(
+            (
+                "climate",
+                "set_temperature",
+                {"entity_id": HEATING, "temperature": 23.0},
+                True,
+            ),
+            services.calls,
+        )
+
+    async def test_heat_cool_manual_source_mode_exits_range_mode(self) -> None:
+        entity, _services = make_entity(cooling_state=HVACMode.COOL)
+        entity._heat_cool_enabled = True
+        event = Event(
+            "state_changed",
+            {
+                "entity_id": COOLING,
+                "old_state": climate_state(COOLING, HVACMode.COOL),
+                "new_state": climate_state(COOLING, HVACMode.OFF),
+            },
+        )
+
+        self.assertTrue(entity._sync_mode_from_event(event))
+        self.assertFalse(entity._heat_cool_enabled)
+        self.assertEqual(entity._last_requested_mode, HVACMode.COOL)
+
+    async def test_delayed_self_mode_event_keeps_heat_cool_enabled(self) -> None:
+        entity, _services = make_entity(cooling_state=HVACMode.OFF)
+        entity._heat_cool_enabled = True
+        entity._expect_source_mode(COOLING, HVACMode.COOL)
+        event = Event(
+            "state_changed",
+            {
+                "entity_id": COOLING,
+                "old_state": climate_state(COOLING, HVACMode.OFF),
+                "new_state": climate_state(COOLING, HVACMode.COOL),
+            },
+        )
+
+        self.assertIsNone(entity._sync_mode_from_event(event))
+        self.assertTrue(entity._heat_cool_enabled)
 
     async def test_non_finite_sensor_uses_safe_fallback(self) -> None:
         entity, services = make_entity(

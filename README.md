@@ -2,8 +2,8 @@
 
 Better Climate is a Home Assistant custom integration that controls an air
 conditioner and an optional boiler from a separate room temperature sensor.
-It exposes one climate entity with a shared target temperature and the modes
-`off`, `cool`, and, when a boiler is configured, `heat`.
+It exposes one climate entity with shared temperature controls and the modes
+`off`, `cool`, and, when a boiler is configured, `heat` and `heat_cool`.
 
 ## Why
 
@@ -16,8 +16,9 @@ conditioning.
 ## Features
 
 - External room temperature sensor for both cooling and heating
-- One shared target temperature
+- One target for cooling or heating, plus a target range for `heat_cool`
 - Optional boiler support
+- Automatic heat/cool range control that retains the active source in idle
 - Optional fan coordination, including directional and variable-speed fans
 - Cooling and heating interlock
 - Configurable hysteresis and source offset
@@ -47,6 +48,11 @@ temperature:
 Hysteresis prevents rapid switching around the target. Changing from cooling to
 heating, or from heating to cooling, turns off and confirms the opposite source
 before enabling the selected source.
+
+When `heat_cool` is selected, the lower target controls heating and the upper
+target controls cooling. Reaching a boundary keeps the selected source enabled
+in its native idle state using the same source-target offset. The source changes
+only after the room crosses the opposite boundary plus hysteresis.
 
 ## Requirements
 
@@ -110,6 +116,8 @@ after saving.
   does not adopt a manually running fan.
 - Manually turning off a fan keeps it off until the current HVAC session ends.
 - Turning off Better Climate attempts to turn off every configured source.
+- Heat/cool mode retains the last concrete source inside the configured range,
+  so its native thermostat and connected fan remain idle without mode cycling.
 - Invalid or unavailable sensor readings stop external correction and restore
   the virtual target to the active source.
 - A restored entity keeps its last target, active mode, and fan ownership.

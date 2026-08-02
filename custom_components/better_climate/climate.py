@@ -14,6 +14,8 @@ from homeassistant.components.climate.const import (
     ATTR_HVAC_ACTION,
     ATTR_MAX_TEMP,
     ATTR_MIN_TEMP,
+    ATTR_TARGET_TEMP_HIGH,
+    ATTR_TARGET_TEMP_LOW,
     ATTR_TARGET_TEMP_STEP,
     ClimateEntityFeature,
     HVACAction,
@@ -74,6 +76,7 @@ from .control import (
     calculate_heating_control,
     evaluate_source_target_change,
     round_and_clamp,
+    select_heat_cool_mode,
 )
 
 EXPECTED_TARGET_TTL = 120
@@ -82,6 +85,8 @@ FAN_SPEED_STEP = 0.5
 FAN_SPEED_HYSTERESIS = 0.1
 ATTR_FAN_OWNED = "fan_owned"
 ATTR_FAN_MANUAL_OFF_MODE = "fan_manual_off_mode"
+ATTR_LAST_REQUESTED_MODE = "last_requested_mode"
+DEFAULT_RANGE_HALF_WIDTH = 0.5
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -119,12 +124,17 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             manufacturer="Better Climate",
         )
         self._target_temperature: float | None = None
+        self._target_temperature_low: float | None = None
+        self._target_temperature_high: float | None = None
         self._last_active_mode = HVACMode.COOL
+        self._last_requested_mode = HVACMode.COOL
+        self._heat_cool_enabled = False
         self._cooling_required = False
         self._heating_required = False
         self._last_command_at = 0.0
         self._last_requested_temperature: float | None = None
         self._expected_source_temperatures: dict[str, deque[tuple[float, float]]] = {}
+        self._expected_source_modes: dict[str, tuple[HVACMode, float]] = {}
         self._fan_owned = False
         self._fan_manual_off_mode: HVACMode | None = None
         self._ceiling_fan_target: tuple[HVACMode, int | None] | None = None
@@ -139,6 +149,12 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         await super().async_added_to_hass()
         restored = await self.async_get_last_state()
         if restored is not None:
+            if (
+                restored.state == HVACMode.HEAT_COOL
+                and self._heating_entity is not None
+            ):
+                self._heat_cool_enabled = True
+                self._last_requested_mode = HVACMode.HEAT_COOL
             restored_mode = restored.attributes.get("last_active_mode")
             if restored_mode not in (HVACMode.COOL, HVACMode.HEAT):
                 restored_mode = restored.state
@@ -152,6 +168,26 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 self._target_temperature = self._normalize_target(
                     float(restored_target)
                 )
+            restored_low = restored.attributes.get(ATTR_TARGET_TEMP_LOW)
+            restored_high = restored.attributes.get(ATTR_TARGET_TEMP_HIGH)
+            if isinstance(restored_low, (int, float)):
+                self._target_temperature_low = self._normalize_target(
+                    float(restored_low)
+                )
+            if isinstance(restored_high, (int, float)):
+                self._target_temperature_high = self._normalize_target(
+                    float(restored_high)
+                )
+            restored_requested_mode = restored.attributes.get(ATTR_LAST_REQUESTED_MODE)
+            if restored_requested_mode in (
+                HVACMode.COOL,
+                HVACMode.HEAT,
+                HVACMode.HEAT_COOL,
+            ) and (
+                restored_requested_mode != HVACMode.HEAT_COOL
+                or self._heating_entity is not None
+            ):
+                self._last_requested_mode = HVACMode(restored_requested_mode)
             self._fan_owned = restored.attributes.get(ATTR_FAN_OWNED) is True
             restored_fan_manual_off_mode = restored.attributes.get(
                 ATTR_FAN_MANUAL_OFF_MODE
@@ -160,6 +196,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 self._fan_manual_off_mode = HVACMode(restored_fan_manual_off_mode)
 
         self._ensure_target_temperature()
+        self._ensure_target_range()
 
         self.async_on_remove(
             async_track_state_change_event(
@@ -201,6 +238,31 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             ),
         )
 
+    @callback
+    def _ensure_target_range(self) -> None:
+        """Initialize heat/cool bounds around the single target."""
+        if self._heating_entity is None or self._target_temperature is None:
+            return
+        step = self.target_temperature_step
+        half_width = max(DEFAULT_RANGE_HALF_WIDTH, step)
+        if self._target_temperature_low is None:
+            self._target_temperature_low = self._normalize_target(
+                self._target_temperature - half_width
+            )
+        if self._target_temperature_high is None:
+            self._target_temperature_high = self._normalize_target(
+                self._target_temperature + half_width
+            )
+        if self._target_temperature_low >= self._target_temperature_high:
+            if self._target_temperature_high < self.max_temp:
+                self._target_temperature_high = self._normalize_target(
+                    self._target_temperature_high + step
+                )
+            else:
+                self._target_temperature_low = self._normalize_target(
+                    self._target_temperature_low - step
+                )
+
     @property
     def _cooling_source(self) -> State | None:
         return self.hass.states.get(self._cooling_entity)
@@ -224,6 +286,10 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             return self._is_available(self._heating_source)
         if self.hvac_mode == HVACMode.COOL:
             return self._is_available(self._cooling_source)
+        if self.hvac_mode == HVACMode.HEAT_COOL:
+            return self._is_available(self._cooling_source) and self._is_available(
+                self._heating_source
+            )
         return self._is_available(self._cooling_source) or self._is_available(
             self._heating_source
         )
@@ -249,6 +315,16 @@ class BetterClimate(ClimateEntity, RestoreEntity):
     def target_temperature(self) -> float | None:
         """Return the virtual target temperature."""
         return self._target_temperature
+
+    @property
+    def target_temperature_low(self) -> float | None:
+        """Return the automatic heating boundary."""
+        return self._target_temperature_low
+
+    @property
+    def target_temperature_high(self) -> float | None:
+        """Return the automatic cooling boundary."""
+        return self._target_temperature_high
 
     @property
     def temperature_unit(self) -> str:
@@ -311,6 +387,12 @@ class BetterClimate(ClimateEntity, RestoreEntity):
     @property
     def hvac_mode(self) -> HVACMode:
         """Return the active source mode."""
+        if self._heat_cool_enabled:
+            return HVACMode.HEAT_COOL
+        return self._source_hvac_mode() or HVACMode.OFF
+
+    def _source_hvac_mode(self) -> HVACMode | None:
+        """Return the concrete active source mode."""
         cooling_active = (
             self._cooling_source is not None
             and self._cooling_source.state == HVACMode.COOL
@@ -325,14 +407,14 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             return HVACMode.COOL
         if heating_active:
             return HVACMode.HEAT
-        return HVACMode.OFF
+        return None
 
     @property
     def hvac_modes(self) -> list[HVACMode]:
         """Return supported HVAC modes."""
         modes = [HVACMode.OFF, HVACMode.COOL]
         if self._heating_entity is not None:
-            modes.append(HVACMode.HEAT)
+            modes.extend((HVACMode.HEAT, HVACMode.HEAT_COOL))
         return modes
 
     @property
@@ -340,9 +422,12 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         """Return the active source action."""
         if self.hvac_mode == HVACMode.OFF:
             return HVACAction.OFF
+        active_mode = self._source_hvac_mode()
+        if active_mode is None:
+            return HVACAction.IDLE
         source = (
             self._cooling_source
-            if self.hvac_mode == HVACMode.COOL
+            if active_mode == HVACMode.COOL
             else self._heating_source
         )
         action = source.attributes.get(ATTR_HVAC_ACTION) if source else None
@@ -351,20 +436,23 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 return HVACAction(action)
             except ValueError:
                 pass
-        if self.hvac_mode == HVACMode.COOL and self._cooling_required:
+        if active_mode == HVACMode.COOL and self._cooling_required:
             return HVACAction.COOLING
-        if self.hvac_mode == HVACMode.HEAT and self._heating_required:
+        if active_mode == HVACMode.HEAT and self._heating_required:
             return HVACAction.HEATING
         return HVACAction.IDLE
 
     @property
     def supported_features(self) -> ClimateEntityFeature:
         """Expose only the controls this wrapper owns."""
-        return (
+        features = (
             ClimateEntityFeature.TARGET_TEMPERATURE
             | ClimateEntityFeature.TURN_ON
             | ClimateEntityFeature.TURN_OFF
         )
+        if self._heating_entity is not None:
+            features |= ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+        return features
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -379,6 +467,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             "cooling_source_hvac_mode": self._state_value(self._cooling_source),
             "heating_source_hvac_mode": self._state_value(self._heating_source),
             "last_active_mode": self._last_active_mode,
+            ATTR_LAST_REQUESTED_MODE: self._last_requested_mode,
             "cooling_required": self._cooling_required,
             "heating_required": self._heating_required,
             "command_temperature": self._active_source_temperature,
@@ -391,9 +480,10 @@ class BetterClimate(ClimateEntity, RestoreEntity):
 
     @property
     def _active_source_temperature(self) -> float | None:
-        if self.hvac_mode == HVACMode.COOL:
+        active_mode = self._source_hvac_mode()
+        if active_mode == HVACMode.COOL:
             source = self._cooling_source
-        elif self.hvac_mode == HVACMode.HEAT:
+        elif active_mode == HVACMode.HEAT:
             source = self._heating_source
         else:
             return None
@@ -408,6 +498,36 @@ class BetterClimate(ClimateEntity, RestoreEntity):
 
     async def async_set_temperature(self, **kwargs) -> None:
         """Set the virtual room target."""
+        target_low = kwargs.get(ATTR_TARGET_TEMP_LOW)
+        target_high = kwargs.get(ATTR_TARGET_TEMP_HIGH)
+        if target_low is not None or target_high is not None:
+            if self._heating_entity is None:
+                raise HomeAssistantError("Heating source is not configured")
+            self._ensure_target_temperature()
+            self._ensure_target_range()
+            current_low = self._target_temperature_low
+            current_high = self._target_temperature_high
+            if current_low is None or current_high is None:
+                raise HomeAssistantError("Target temperature range is unavailable")
+            try:
+                low = self._normalize_target(
+                    float(target_low if target_low is not None else current_low)
+                )
+                high = self._normalize_target(
+                    float(target_high if target_high is not None else current_high)
+                )
+            except (OverflowError, TypeError, ValueError) as err:
+                raise HomeAssistantError("Invalid target temperature range") from err
+            if low > high:
+                raise HomeAssistantError(
+                    "Heating target must not exceed cooling target"
+                )
+            self._target_temperature_low = low
+            self._target_temperature_high = high
+            self.async_write_ha_state()
+            if self.hvac_mode == HVACMode.HEAT_COOL:
+                await self._async_reconcile(force=True)
+            return
         temperature = kwargs.get(ATTR_TEMPERATURE)
         if temperature is None:
             return
@@ -422,10 +542,21 @@ class BetterClimate(ClimateEntity, RestoreEntity):
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Select the cooling source, heating source, or off."""
         if hvac_mode == HVACMode.COOL:
+            self._heat_cool_enabled = False
+            self._last_requested_mode = HVACMode.COOL
             await self._async_activate_cooling()
             return
         if hvac_mode == HVACMode.HEAT and self._heating_entity is not None:
+            self._heat_cool_enabled = False
+            self._last_requested_mode = HVACMode.HEAT
             await self._async_activate_heating()
+            return
+        if hvac_mode == HVACMode.HEAT_COOL and self._heating_entity is not None:
+            self._ensure_target_range()
+            self._heat_cool_enabled = True
+            self._last_requested_mode = HVACMode.HEAT_COOL
+            self.async_write_ha_state()
+            await self._async_reconcile(force=True)
             return
         if hvac_mode == HVACMode.OFF:
             await self.async_turn_off()
@@ -434,15 +565,23 @@ class BetterClimate(ClimateEntity, RestoreEntity):
 
     async def async_turn_on(self) -> None:
         """Resume the most recently active mode."""
+        if (
+            self._last_requested_mode == HVACMode.HEAT_COOL
+            and self._heating_entity is not None
+        ):
+            await self.async_set_hvac_mode(HVACMode.HEAT_COOL)
+            return
         if self._last_active_mode == HVACMode.HEAT and self._heating_entity is not None:
             await self._async_activate_heating()
             return
         await self._async_activate_cooling()
 
-    async def _async_activate_cooling(self) -> None:
+    async def _async_activate_cooling(self, *, reconcile: bool = True) -> None:
         """Turn off heating before enabling cooling."""
         async with self._transition_lock:
             await self._async_activate_cooling_locked()
+        if reconcile:
+            await self._async_reconcile(force=True)
 
     async def _async_activate_cooling_locked(self) -> None:
         """Enable cooling while holding the transition lock."""
@@ -453,23 +592,16 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         self._heating_required = False
         if self._heating_entity is not None:
             await self._async_turn_source_off(self._heating_entity)
-        await self.hass.services.async_call(
-            "climate",
-            "set_hvac_mode",
-            {
-                "entity_id": self._cooling_entity,
-                "hvac_mode": HVACMode.COOL,
-            },
-            blocking=True,
-        )
+        await self._async_set_source_mode(self._cooling_entity, HVACMode.COOL)
         await self._async_sync_ceiling_fan(HVACMode.COOL, adopt=True)
-        await self._async_reconcile(force=True)
         self.async_write_ha_state()
 
-    async def _async_activate_heating(self) -> None:
+    async def _async_activate_heating(self, *, reconcile: bool = True) -> None:
         """Turn off cooling before enabling heating."""
         async with self._transition_lock:
             await self._async_activate_heating_locked()
+        if reconcile:
+            await self._async_reconcile(force=True)
 
     async def _async_activate_heating_locked(self) -> None:
         """Enable heating while holding the transition lock."""
@@ -481,21 +613,13 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         self._cancel_pending_timer()
         self._cooling_required = False
         await self._async_turn_source_off(self._cooling_entity)
-        await self.hass.services.async_call(
-            "climate",
-            "set_hvac_mode",
-            {
-                "entity_id": self._heating_entity,
-                "hvac_mode": HVACMode.HEAT,
-            },
-            blocking=True,
-        )
+        await self._async_set_source_mode(self._heating_entity, HVACMode.HEAT)
         await self._async_sync_ceiling_fan(HVACMode.HEAT, adopt=True)
-        await self._async_reconcile(force=True)
         self.async_write_ha_state()
 
     async def async_turn_off(self) -> None:
         """Turn off every configured source."""
+        self._heat_cool_enabled = False
         async with self._transition_lock:
             await self._async_turn_off_locked()
 
@@ -509,7 +633,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             entities.append(self._heating_entity)
         active_entity = (
             self._heating_entity
-            if self.hvac_mode == HVACMode.HEAT
+            if self._source_hvac_mode() == HVACMode.HEAT
             else self._cooling_entity
         )
         entities.sort(key=lambda entity_id: entity_id != active_entity)
@@ -553,15 +677,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             self.hass, [entity_id], _source_changed
         )
         try:
-            await self.hass.services.async_call(
-                "climate",
-                "set_hvac_mode",
-                {
-                    "entity_id": entity_id,
-                    "hvac_mode": HVACMode.OFF,
-                },
-                blocking=True,
-            )
+            await self._async_set_source_mode(entity_id, HVACMode.OFF)
             state = self.hass.states.get(entity_id)
             if state is None or state.state != HVACMode.OFF:
                 try:
@@ -641,14 +757,76 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 self._ceiling_fan_retry_used = False
                 self.hass.async_create_task(self._async_sync_ceiling_fan())
             return
-        target_changed = self._sync_target_from_event(event)
+        mode_changed = self._sync_mode_from_event(event)
+        target_changed = (
+            False if mode_changed is None else self._sync_target_from_event(event)
+        )
         self.async_write_ha_state()
         if entity_id in (self._cooling_entity, self._heating_entity):
             self.hass.async_create_task(
-                self._async_sync_source(entity_id, force=target_changed)
+                self._async_sync_source(
+                    entity_id, force=mode_changed is True or target_changed
+                )
             )
         else:
             self._schedule_reconcile()
+
+    @callback
+    def _sync_mode_from_event(self, event: Event[EventStateChangedData]) -> bool | None:
+        """Leave heat/cool for manual mode changes; mark our own events as None."""
+        entity_id = event.data["entity_id"]
+        old_state = event.data["old_state"]
+        new_state = event.data["new_state"]
+        if (
+            entity_id not in (self._cooling_entity, self._heating_entity)
+            or old_state is None
+            or new_state is None
+            or old_state.state == new_state.state
+        ):
+            return False
+        if self._consume_expected_source_mode(entity_id, new_state.state):
+            return None
+        if not self._heat_cool_enabled or self._transition_lock.locked():
+            return False
+
+        self._heat_cool_enabled = False
+        mode = HVACMode.COOL if entity_id == self._cooling_entity else HVACMode.HEAT
+        self._last_requested_mode = mode
+        if new_state.state == mode:
+            self._last_active_mode = mode
+        return True
+
+    def _expect_source_mode(self, entity_id: str, mode: HVACMode) -> None:
+        """Remember a source mode command until its delayed state event arrives."""
+        self._expected_source_modes[entity_id] = (mode, monotonic())
+
+    async def _async_set_source_mode(self, entity_id: str, mode: HVACMode) -> None:
+        """Set and record a requested source mode."""
+        self._expect_source_mode(entity_id, mode)
+        try:
+            await self.hass.services.async_call(
+                "climate",
+                "set_hvac_mode",
+                {"entity_id": entity_id, "hvac_mode": mode},
+                blocking=True,
+            )
+        except Exception:
+            self._expected_source_modes.pop(entity_id, None)
+            raise
+
+    def _consume_expected_source_mode(self, entity_id: str, mode: str) -> bool:
+        """Return whether a source mode event matches our latest command."""
+        expected = self._expected_source_modes.get(entity_id)
+        if expected is None:
+            return False
+        expected_mode, created_at = expected
+        if monotonic() - created_at > EXPECTED_TARGET_TTL:
+            self._expected_source_modes.pop(entity_id, None)
+            return False
+        if mode != expected_mode:
+            return False
+        self._expected_source_modes.pop(entity_id, None)
+        return True
 
     @callback
     def _sync_target_from_event(self, event: Event[EventStateChangedData]) -> bool:
@@ -685,7 +863,20 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             return False
 
         self._expected_source_temperatures.pop(entity_id, None)
-        self._target_temperature = self._normalize_target(new_target)
+        normalized_target = self._normalize_target(new_target)
+        if self._heat_cool_enabled:
+            if entity_id == self._cooling_entity:
+                self._target_temperature_high = max(
+                    normalized_target,
+                    self._target_temperature_low or normalized_target,
+                )
+            else:
+                self._target_temperature_low = min(
+                    normalized_target,
+                    self._target_temperature_high or normalized_target,
+                )
+        else:
+            self._target_temperature = normalized_target
         return True
 
     async def _async_sync_source(self, entity_id: str, *, force: bool = False) -> None:
@@ -717,8 +908,8 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 self._heating_required = False
 
             await self._async_sync_ceiling_fan()
-            await self._async_reconcile(force=force)
             self.async_write_ha_state()
+        await self._async_reconcile(force=force)
 
     async def _async_initialize_control(self) -> None:
         """Enforce a single active source after Home Assistant starts."""
@@ -742,16 +933,54 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             elif heating_active:
                 self._last_active_mode = HVACMode.HEAT
             await self._async_sync_ceiling_fan()
-            await self._async_reconcile(force=True)
             self.async_write_ha_state()
+        await self._async_reconcile(force=True)
 
     @callback
     def _schedule_reconcile(self, force: bool = False) -> None:
         self.hass.async_create_task(self._async_reconcile(force=force))
 
     async def _async_reconcile(self, force: bool = False) -> None:
+        virtual_mode = self.hvac_mode
+        if virtual_mode == HVACMode.HEAT_COOL:
+            if (
+                self._target_temperature_low is None
+                or self._target_temperature_high is None
+                or self.current_temperature is None
+            ):
+                return
+            selected_mode = HVACMode(
+                select_heat_cool_mode(
+                    room_temperature=self.current_temperature,
+                    target_low=self._target_temperature_low,
+                    target_high=self._target_temperature_high,
+                    hysteresis=self._hysteresis,
+                    active_mode=self._source_hvac_mode(),
+                    last_active_mode=self._last_active_mode,
+                )
+            )
+            if selected_mode != self._source_hvac_mode():
+                selected_source = (
+                    self._cooling_source
+                    if selected_mode == HVACMode.COOL
+                    else self._heating_source
+                )
+                if not self._is_available(selected_source):
+                    return
+                if selected_mode == HVACMode.COOL:
+                    await self._async_activate_cooling(reconcile=False)
+                else:
+                    await self._async_activate_heating(reconcile=False)
+                self._heat_cool_enabled = True
+                self._last_requested_mode = HVACMode.HEAT_COOL
+                self.async_write_ha_state()
+                return
         async with self._control_lock:
-            mode = self.hvac_mode
+            mode = (
+                self._source_hvac_mode()
+                if virtual_mode == HVACMode.HEAT_COOL
+                else virtual_mode
+            )
             if (
                 mode not in (HVACMode.COOL, HVACMode.HEAT)
                 or self._target_temperature is None
@@ -773,9 +1002,18 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             if self.min_temp > self.max_temp:
                 return
 
-            normalized_target = self._normalize_target(self._target_temperature)
-            if normalized_target != self._target_temperature:
-                self._target_temperature = normalized_target
+            target_temperature = self._control_target_for_mode(mode)
+            if target_temperature is None:
+                return
+            normalized_target = self._normalize_target(target_temperature)
+            if normalized_target != target_temperature:
+                if virtual_mode == HVACMode.HEAT_COOL:
+                    if mode == HVACMode.COOL:
+                        self._target_temperature_high = normalized_target
+                    else:
+                        self._target_temperature_low = normalized_target
+                else:
+                    self._target_temperature = normalized_target
                 self.async_write_ha_state()
 
             internal = source.attributes.get("current_temperature")
@@ -791,7 +1029,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             if mode == HVACMode.COOL:
                 cooling_result = calculate_control(
                     room_temperature=room,
-                    target_temperature=self._target_temperature,
+                    target_temperature=normalized_target,
                     internal_temperature=float(internal),
                     cooling_required=self._cooling_required,
                     hysteresis=self._hysteresis,
@@ -805,7 +1043,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             else:
                 heating_result = calculate_heating_control(
                     room_temperature=room,
-                    target_temperature=self._target_temperature,
+                    target_temperature=normalized_target,
                     internal_temperature=float(internal),
                     heating_required=self._heating_required,
                     hysteresis=self._hysteresis,
@@ -840,17 +1078,28 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             self._last_command_at = monotonic()
             self.async_write_ha_state()
 
+    def _control_target_for_mode(self, mode: HVACMode) -> float | None:
+        """Return the target used by the concrete source."""
+        if self.hvac_mode == HVACMode.HEAT_COOL:
+            return (
+                self._target_temperature_high
+                if mode == HVACMode.COOL
+                else self._target_temperature_low
+            )
+        return self._target_temperature
+
     async def _async_fallback_to_source_thermostat(
         self, mode: HVACMode, source: State
     ) -> None:
         """Remove forced setpoints when external control data is unavailable."""
-        if self._target_temperature is None:
+        target = self._control_target_for_mode(mode)
+        if target is None:
             return
         self._cancel_pending_timer()
         self._cooling_required = False
         self._heating_required = False
         fallback = round_and_clamp(
-            self._target_temperature,
+            target,
             minimum=self._source_min_temp(source),
             maximum=self._source_max_temp(source),
             step=self._source_temperature_step(source),
@@ -1031,11 +1280,12 @@ class BetterClimate(ClimateEntity, RestoreEntity):
     def _ceiling_fan_percentage(self, mode: HVACMode, fan: State | None) -> int | None:
         """Return the fan speed for the current room temperature difference."""
         room_temperature = self.current_temperature
+        target_temperature = self._control_target_for_mode(mode)
         if (
             fan is None
             or mode not in (HVACMode.COOL, HVACMode.HEAT)
             or room_temperature is None
-            or self._target_temperature is None
+            or target_temperature is None
             or not (
                 FanEntityFeature(fan.attributes.get(ATTR_SUPPORTED_FEATURES, 0))
                 & FanEntityFeature.SET_SPEED
@@ -1050,9 +1300,9 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             return None
 
         difference = round(
-            room_temperature - self._target_temperature
+            room_temperature - target_temperature
             if mode == HVACMode.COOL
-            else self._target_temperature - room_temperature,
+            else target_temperature - room_temperature,
             3,
         )
         speed_count = max(1, round(100 / percentage_step))

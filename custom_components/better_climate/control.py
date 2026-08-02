@@ -122,3 +122,24 @@ def calculate_heating_control(
             command, minimum=minimum, maximum=maximum, step=step
         ),
     )
+
+
+def select_heat_cool_mode(
+    *,
+    room_temperature: float,
+    target_low: float,
+    target_high: float,
+    hysteresis: float,
+    active_mode: str | None,
+    last_active_mode: str,
+) -> str:
+    """Select a source while retaining the active source inside the range."""
+    if active_mode == "cool":
+        return "heat" if room_temperature <= target_low - hysteresis else "cool"
+    if active_mode == "heat":
+        return "cool" if room_temperature >= target_high + hysteresis else "heat"
+    if room_temperature >= target_high + hysteresis:
+        return "cool"
+    if room_temperature <= target_low - hysteresis:
+        return "heat"
+    return last_active_mode

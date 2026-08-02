@@ -16,6 +16,7 @@ calculate_control = control.calculate_control
 calculate_heating_control = control.calculate_heating_control
 evaluate_source_target_change = control.evaluate_source_target_change
 round_and_clamp = control.round_and_clamp
+select_heat_cool_mode = control.select_heat_cool_mode
 
 
 class ControlTest(unittest.TestCase):
@@ -278,6 +279,58 @@ class TargetNormalizationTest(unittest.TestCase):
             round_and_clamp(float("nan"), minimum=18, maximum=30, step=0.5)
         with self.assertRaises(ValueError):
             round_and_clamp(24, minimum=30, maximum=18, step=0.5)
+
+
+class HeatCoolSelectionTest(unittest.TestCase):
+    """Verify heat/cool source retention and boundary switching."""
+
+    def test_retains_active_source_inside_range(self) -> None:
+        self.assertEqual(
+            select_heat_cool_mode(
+                room_temperature=24,
+                target_low=23,
+                target_high=25,
+                hysteresis=0.3,
+                active_mode="cool",
+                last_active_mode="heat",
+            ),
+            "cool",
+        )
+        self.assertEqual(
+            select_heat_cool_mode(
+                room_temperature=24,
+                target_low=23,
+                target_high=25,
+                hysteresis=0.3,
+                active_mode="heat",
+                last_active_mode="cool",
+            ),
+            "heat",
+        )
+
+    def test_switches_only_after_opposite_boundary(self) -> None:
+        self.assertEqual(
+            select_heat_cool_mode(
+                room_temperature=22.7,
+                target_low=23,
+                target_high=25,
+                hysteresis=0.3,
+                active_mode="cool",
+                last_active_mode="cool",
+            ),
+            "heat",
+        )
+        self.assertEqual(
+            select_heat_cool_mode(
+                room_temperature=25.3,
+                target_low=23,
+                target_high=25,
+                hysteresis=0.3,
+                active_mode="heat",
+                last_active_mode="heat",
+            ),
+            "cool",
+        )
 
 
 if __name__ == "__main__":
