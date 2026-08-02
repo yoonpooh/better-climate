@@ -146,6 +146,14 @@ def make_entity(
 class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
     """Verify safety behavior around the pure controller."""
 
+    async def test_default_heat_cool_range_is_22_to_25(self) -> None:
+        entity, _services = make_entity()
+
+        entity._ensure_target_range()
+
+        self.assertEqual(entity.target_temperature_low, 22)
+        self.assertEqual(entity.target_temperature_high, 25)
+
     async def test_fan_ownership_survives_entity_restoration(self) -> None:
         entity, services = make_entity(fan_state="on")
         entity.async_get_last_state = AsyncMock(

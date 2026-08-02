@@ -86,7 +86,8 @@ FAN_SPEED_HYSTERESIS = 0.1
 ATTR_FAN_OWNED = "fan_owned"
 ATTR_FAN_MANUAL_OFF_MODE = "fan_manual_off_mode"
 ATTR_LAST_REQUESTED_MODE = "last_requested_mode"
-DEFAULT_RANGE_HALF_WIDTH = 0.5
+DEFAULT_TARGET_LOW = 22
+DEFAULT_TARGET_HIGH = 25
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -243,17 +244,12 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         """Initialize heat/cool bounds around the single target."""
         if self._heating_entity is None or self._target_temperature is None:
             return
-        step = self.target_temperature_step
-        half_width = max(DEFAULT_RANGE_HALF_WIDTH, step)
         if self._target_temperature_low is None:
-            self._target_temperature_low = self._normalize_target(
-                self._target_temperature - half_width
-            )
+            self._target_temperature_low = self._normalize_target(DEFAULT_TARGET_LOW)
         if self._target_temperature_high is None:
-            self._target_temperature_high = self._normalize_target(
-                self._target_temperature + half_width
-            )
+            self._target_temperature_high = self._normalize_target(DEFAULT_TARGET_HIGH)
         if self._target_temperature_low >= self._target_temperature_high:
+            step = self.target_temperature_step
             if self._target_temperature_high < self.max_temp:
                 self._target_temperature_high = self._normalize_target(
                     self._target_temperature_high + step

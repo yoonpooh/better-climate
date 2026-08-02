@@ -52,7 +52,8 @@ before enabling the selected source.
 When `heat_cool` is selected, the lower target controls heating and the upper
 target controls cooling. Reaching a boundary keeps the selected source enabled
 in its native idle state using the same source-target offset. The source changes
-only after the room crosses the opposite boundary plus hysteresis.
+only after the room crosses the opposite boundary plus hysteresis. The initial
+range is `22 °C` to `25 °C`; user changes are restored after restart.
 
 ## Requirements
 
