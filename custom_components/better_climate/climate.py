@@ -893,7 +893,6 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 and state is not None
                 and state.state == HVACMode.COOL
             ):
-                self._idle_source_mode = None
                 self._last_active_mode = HVACMode.COOL
                 self._cancel_pending_timer()
                 self._heating_required = False
@@ -904,7 +903,6 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 and state is not None
                 and state.state == HVACMode.HEAT
             ):
-                self._idle_source_mode = None
                 self._last_active_mode = HVACMode.HEAT
                 self._cancel_pending_timer()
                 self._cooling_required = False

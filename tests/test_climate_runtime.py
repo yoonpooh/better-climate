@@ -495,6 +495,20 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(entity._sync_mode_from_event(event))
         self.assertTrue(entity._heat_cool_enabled)
 
+    async def test_delayed_source_off_keeps_selected_idle_mode(self) -> None:
+        entity, _services = make_entity(cooling_state=HVACMode.COOL)
+        entity._idle_source_mode = HVACMode.COOL
+        entity._async_reconcile = AsyncMock()
+
+        await entity._async_sync_source(COOLING)
+        entity.hass.states._states[COOLING] = climate_state(
+            COOLING, HVACMode.OFF
+        )
+        await entity._async_sync_source(COOLING)
+
+        self.assertEqual(entity.hvac_mode, HVACMode.COOL)
+        self.assertEqual(entity.hvac_action, HVACAction.IDLE)
+
     async def test_non_finite_sensor_uses_safe_fallback(self) -> None:
         entity, services = make_entity(
             cooling_state=HVACMode.COOL,
