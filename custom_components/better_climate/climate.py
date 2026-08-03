@@ -88,6 +88,7 @@ ATTR_FAN_MANUAL_OFF_MODE = "fan_manual_off_mode"
 ATTR_IDLE_SOURCE_MODE = "idle_source_mode"
 ATTR_LAST_REQUESTED_MODE = "last_requested_mode"
 DEFAULT_TARGET_LOW = 22
+SOURCE_OFF_RETRY_INTERVAL = 30
 DEFAULT_TARGET_HIGH = 25
 _LOGGER = logging.getLogger(__name__)
 
@@ -143,6 +144,8 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         self._ceiling_fan_target: tuple[HVACMode, int | None] | None = None
         self._ceiling_fan_retry_used = False
         self._ceiling_fan_retry_timer: Callable[[], None] | None = None
+        self._source_off_requested = False
+        self._source_off_retry_timer: Callable[[], None] | None = None
         self._pending_timer: Callable[[], None] | None = None
         self._control_lock = asyncio.Lock()
         self._transition_lock = asyncio.Lock()
@@ -224,6 +227,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         )
         self.async_on_remove(self._cancel_pending_timer)
         self.async_on_remove(self._cancel_ceiling_fan_retry)
+        self.async_on_remove(self._cancel_source_off_retry)
         self.hass.async_create_task(self._async_initialize_control())
 
     @callback
@@ -556,6 +560,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             await self._async_activate_heating()
             return
         if hvac_mode == HVACMode.HEAT_COOL and self._heating_entity is not None:
+            self._cancel_source_off_retry()
             self._ensure_target_range()
             self._heat_cool_enabled = True
             self._last_requested_mode = HVACMode.HEAT_COOL
@@ -589,6 +594,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
 
     async def _async_activate_cooling_locked(self) -> None:
         """Enable cooling while holding the transition lock."""
+        self._cancel_source_off_retry()
         if not self._is_available(self._cooling_source):
             raise HomeAssistantError("Cooling source is unavailable")
         self._last_active_mode = HVACMode.COOL
@@ -610,6 +616,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
 
     async def _async_activate_heating_locked(self) -> None:
         """Enable heating while holding the transition lock."""
+        self._cancel_source_off_retry()
         if self._heating_entity is None:
             raise HomeAssistantError("Heating source is not configured")
         if not self._is_available(self._heating_source):
@@ -625,10 +632,16 @@ class BetterClimate(ClimateEntity, RestoreEntity):
 
     async def async_turn_off(self) -> None:
         """Turn off every configured source."""
+        self._cancel_source_off_retry()
+        self._source_off_requested = True
         self._heat_cool_enabled = False
         self._idle_source_mode = None
-        async with self._transition_lock:
-            await self._async_turn_off_locked()
+        try:
+            async with self._transition_lock:
+                await self._async_turn_off_locked()
+        except HomeAssistantError:
+            self._set_source_off_retry()
+            raise
 
     async def _async_turn_off_locked(self) -> None:
         """Turn off every source while holding the transition lock."""
@@ -965,6 +978,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 and state is not None
                 and state.state == HVACMode.COOL
             ):
+                self._cancel_source_off_retry()
                 self._last_active_mode = HVACMode.COOL
                 self._cancel_pending_timer()
                 self._heating_required = False
@@ -975,6 +989,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 and state is not None
                 and state.state == HVACMode.HEAT
             ):
+                self._cancel_source_off_retry()
                 self._last_active_mode = HVACMode.HEAT
                 self._cancel_pending_timer()
                 self._cooling_required = False
@@ -1226,6 +1241,36 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         if self._pending_timer is not None:
             self._pending_timer()
             self._pending_timer = None
+
+    @callback
+    def _set_source_off_retry(self) -> None:
+        if not self._source_off_requested or self._source_off_retry_timer is not None:
+            return
+
+        @callback
+        def _run(_now) -> None:
+            self._source_off_retry_timer = None
+            self.hass.async_create_task(self._async_retry_turn_off())
+
+        self._source_off_retry_timer = async_call_later(
+            self.hass, SOURCE_OFF_RETRY_INTERVAL, _run
+        )
+
+    async def _async_retry_turn_off(self) -> None:
+        if not self._source_off_requested:
+            return
+        try:
+            async with self._transition_lock:
+                await self._async_turn_off_locked()
+        except HomeAssistantError:
+            self._set_source_off_retry()
+
+    @callback
+    def _cancel_source_off_retry(self) -> None:
+        self._source_off_requested = False
+        if self._source_off_retry_timer is not None:
+            self._source_off_retry_timer()
+            self._source_off_retry_timer = None
 
     async def _async_sync_ceiling_fan(
         self,

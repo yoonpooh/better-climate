@@ -120,6 +120,8 @@ after saving.
 - Turning off Better Climate attempts to turn off every configured source.
 - Sources with native power controls are powered on before their HVAC mode is
   selected and use their native power-off service when stopped.
+- A failed explicit power-off is retried every 30 seconds until it succeeds or
+  the climate source is turned on again.
 - Idle powers off the selected cooling or heating source while preserving the
   virtual HVAC mode and connected fan. Demand restarts the selected source.
 - Invalid or unavailable sensor readings stop external correction and restore

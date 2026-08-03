@@ -28,6 +28,7 @@ from custom_components.better_climate.climate import (
     ATTR_FAN_MANUAL_OFF_MODE,
     ATTR_FAN_OWNED,
     ATTR_IDLE_SOURCE_MODE,
+    SOURCE_OFF_RETRY_INTERVAL,
     BetterClimate,
 )
 from custom_components.better_climate.const import (
@@ -309,6 +310,28 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await entity._async_turn_off_locked()
 
         self.assertCountEqual(calls, [COOLING, HEATING])
+
+    async def test_turn_off_failure_retries_until_it_succeeds(self) -> None:
+        entity, _services = make_entity(cooling_state=HVACMode.COOL)
+        entity._async_turn_source_off = AsyncMock(
+            side_effect=[HomeAssistantError("offline"), None, None, None]
+        )
+        tasks = []
+        entity.hass.async_create_task = tasks.append
+
+        with patch(
+            "custom_components.better_climate.climate.async_call_later",
+            return_value=lambda: None,
+        ) as call_later:
+            with self.assertRaises(HomeAssistantError):
+                await entity.async_turn_off()
+
+            self.assertEqual(call_later.call_args.args[1], SOURCE_OFF_RETRY_INTERVAL)
+            call_later.call_args.args[2](None)
+            await tasks.pop()
+
+        self.assertEqual(entity._async_turn_source_off.await_count, 4)
+        self.assertIsNone(entity._source_off_retry_timer)
 
     async def test_power_services_wrap_source_mode_changes(self) -> None:
         entity, services = make_entity(cooling_state=HVACMode.OFF)
