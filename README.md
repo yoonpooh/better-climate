@@ -41,20 +41,20 @@ temperature:
 | State | Source target |
 | --- | --- |
 | Cooling required | Internal temperature minus the source offset |
-| Cooling satisfied | Cooling source off |
+| Cooling satisfied | Internal temperature plus the source offset |
 | Heating required | Internal temperature plus the source offset |
-| Heating satisfied | Heating source off |
+| Heating satisfied | Internal temperature minus the source offset |
 
 Hysteresis prevents rapid switching around the target. Changing from cooling to
 heating, or from heating to cooling, turns off and confirms the opposite source
 before enabling the selected source.
 
-When demand is satisfied, Better Climate powers off the selected cooling or
-heating source while keeping the virtual mode in `idle`. It restores that source
-when the room crosses the target plus hysteresis. In `heat_cool`, the selected
-cooling or heating mode is retained while idle and changes only after the room
-crosses the opposite boundary plus hysteresis. The initial range is `22 °C` to
-`25 °C`; user changes are restored after restart.
+When demand is satisfied, Better Climate leaves the selected source on and
+shifts its target so the source's native thermostat can idle without repeated
+power cycles. In `heat_cool`, the selected cooling or heating mode is retained
+while idle and changes only after the room crosses the opposite boundary plus
+hysteresis. The initial range is `22 °C` to `25 °C`; user changes are restored
+after restart.
 
 ## Requirements
 
@@ -122,8 +122,8 @@ after saving.
   selected and use their native power-off service when stopped.
 - A failed explicit power-off is retried every 30 seconds until it succeeds or
   the climate source is turned on again.
-- Idle powers off the selected cooling or heating source while preserving the
-  virtual HVAC mode and connected fan. Demand restarts the selected source.
+- Idle keeps the selected cooling or heating source powered and uses its native
+  thermostat to avoid short power cycles.
 - Invalid or unavailable sensor readings stop external correction and restore
   the virtual target to the active source.
 - A restored entity keeps its last target, active mode, and fan ownership.

@@ -1132,18 +1132,6 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             self.async_write_ha_state()
             await self._async_sync_ceiling_fan(mode)
 
-            conditioning_required = (
-                self._cooling_required
-                if mode == HVACMode.COOL
-                else self._heating_required
-            )
-            if not conditioning_required:
-                self._idle_source_mode = mode
-                if source.state != HVACMode.OFF:
-                    await self._async_turn_source_off(source_entity)
-                self.async_write_ha_state()
-                return
-
             if source.state != mode:
                 if mode == HVACMode.COOL:
                     await self._async_activate_cooling(reconcile=False)
