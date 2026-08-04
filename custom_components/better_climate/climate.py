@@ -68,6 +68,7 @@ from .const import (
     CONF_HEATING_ENTITY,
     CONF_HYSTERESIS,
     CONF_MIN_COMMAND_INTERVAL,
+    CONF_POWER_OFF_WHEN_COOLING_IDLE,
     CONF_TEMPERATURE_SENSOR,
     DOMAIN,
 )
@@ -90,6 +91,8 @@ ATTR_LAST_REQUESTED_MODE = "last_requested_mode"
 DEFAULT_TARGET_LOW = 22
 SOURCE_OFF_RETRY_INTERVAL = 30
 DEFAULT_TARGET_HIGH = 25
+IDLE_COOLING_OFF_DELAY = 30
+COOLING_RESTART_DELAY = 180
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -120,6 +123,9 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         self._hysteresis = float(entry.data[CONF_HYSTERESIS])
         self._force_offset = float(entry.data[CONF_FORCE_OFFSET])
         self._min_command_interval = float(entry.data[CONF_MIN_COMMAND_INTERVAL])
+        self._power_off_when_cooling_idle = bool(
+            entry.data.get(CONF_POWER_OFF_WHEN_COOLING_IDLE, False)
+        )
         self._attr_unique_id = entry.entry_id
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
@@ -147,6 +153,9 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         self._source_off_requested = False
         self._source_off_retry_timer: Callable[[], None] | None = None
         self._pending_timer: Callable[[], None] | None = None
+        self._idle_cooling_off_timer: Callable[[], None] | None = None
+        self._cooling_restart_timer: Callable[[], None] | None = None
+        self._cooling_source_off_at = 0.0
         self._control_lock = asyncio.Lock()
         self._transition_lock = asyncio.Lock()
 
@@ -226,6 +235,8 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             )
         )
         self.async_on_remove(self._cancel_pending_timer)
+        self.async_on_remove(self._cancel_idle_cooling_off_timer)
+        self.async_on_remove(self._cancel_cooling_restart_timer)
         self.async_on_remove(self._cancel_ceiling_fan_retry)
         self.async_on_remove(self._cancel_source_off_retry)
         self.hass.async_create_task(self._async_initialize_control())
@@ -480,6 +491,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             "heating_required": self._heating_required,
             "command_temperature": self._active_source_temperature,
             "last_requested_temperature": (self._last_requested_temperature),
+            CONF_POWER_OFF_WHEN_COOLING_IDLE: self._power_off_when_cooling_idle,
         }
 
     @staticmethod
@@ -603,6 +615,8 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         if self._heating_entity is not None:
             await self._async_turn_source_off(self._heating_entity)
         await self._async_set_source_mode(self._cooling_entity, HVACMode.COOL)
+        self._cooling_source_off_at = 0.0
+        self._cancel_cooling_restart_timer()
         self._idle_source_mode = HVACMode.COOL
         await self._async_sync_ceiling_fan(HVACMode.COOL, adopt=True)
         self.async_write_ha_state()
@@ -646,6 +660,8 @@ class BetterClimate(ClimateEntity, RestoreEntity):
     async def _async_turn_off_locked(self) -> None:
         """Turn off every source while holding the transition lock."""
         self._cancel_pending_timer()
+        self._cancel_idle_cooling_off_timer()
+        self._cancel_cooling_restart_timer()
         self._cooling_required = False
         self._heating_required = False
         entities = [self._cooling_entity]
@@ -1056,6 +1072,9 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             )
         async with self._control_lock:
             mode = selected_mode if virtual_mode == HVACMode.HEAT_COOL else virtual_mode
+            if mode != HVACMode.COOL:
+                self._cancel_idle_cooling_off_timer()
+                self._cancel_cooling_restart_timer()
             if (
                 mode not in (HVACMode.COOL, HVACMode.HEAT)
                 or self._target_temperature is None
@@ -1132,7 +1151,26 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             self.async_write_ha_state()
             await self._async_sync_ceiling_fan(mode)
 
+            if mode == HVACMode.COOL and self._power_off_when_cooling_idle:
+                if self._cooling_required:
+                    self._cancel_idle_cooling_off_timer()
+                elif source.state == HVACMode.COOL:
+                    if room <= normalized_target:
+                        self._set_idle_cooling_off_timer()
+                    else:
+                        self._cancel_idle_cooling_off_timer()
+                else:
+                    self._cancel_idle_cooling_off_timer()
+                    return
+
             if source.state != mode:
+                if mode == HVACMode.COOL and self._power_off_when_cooling_idle:
+                    remaining = COOLING_RESTART_DELAY - (
+                        monotonic() - self._cooling_source_off_at
+                    )
+                    if self._cooling_source_off_at and remaining > 0:
+                        self._set_cooling_restart_timer(remaining)
+                        return
                 if mode == HVACMode.COOL:
                     await self._async_activate_cooling(reconcile=False)
                 else:
@@ -1229,6 +1267,68 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         if self._pending_timer is not None:
             self._pending_timer()
             self._pending_timer = None
+
+    @callback
+    def _set_idle_cooling_off_timer(
+        self, delay: float = IDLE_COOLING_OFF_DELAY
+    ) -> None:
+        if self._idle_cooling_off_timer is not None:
+            return
+
+        @callback
+        def _run(_now) -> None:
+            self._idle_cooling_off_timer = None
+            self.hass.async_create_task(self._async_power_off_idle_cooling())
+
+        self._idle_cooling_off_timer = async_call_later(self.hass, delay, _run)
+
+    @callback
+    def _cancel_idle_cooling_off_timer(self) -> None:
+        if self._idle_cooling_off_timer is not None:
+            self._idle_cooling_off_timer()
+            self._idle_cooling_off_timer = None
+
+    async def _async_power_off_idle_cooling(self) -> None:
+        async with self._control_lock:
+            room = self.current_temperature
+            target = self._control_target_for_mode(HVACMode.COOL)
+            if (
+                not self._power_off_when_cooling_idle
+                or self.hvac_mode not in (HVACMode.COOL, HVACMode.HEAT_COOL)
+                or self._idle_source_mode != HVACMode.COOL
+                or self._cooling_source is None
+                or self._cooling_source.state != HVACMode.COOL
+                or room is None
+                or target is None
+                or room > target
+                or self._cooling_required
+            ):
+                return
+            try:
+                await self._async_turn_source_off(self._cooling_entity)
+            except HomeAssistantError:
+                self._set_idle_cooling_off_timer(SOURCE_OFF_RETRY_INTERVAL)
+                return
+            self._cooling_source_off_at = monotonic()
+            self.async_write_ha_state()
+
+    @callback
+    def _set_cooling_restart_timer(self, delay: float) -> None:
+        if self._cooling_restart_timer is not None:
+            return
+
+        @callback
+        def _run(_now) -> None:
+            self._cooling_restart_timer = None
+            self._schedule_reconcile(force=True)
+
+        self._cooling_restart_timer = async_call_later(self.hass, delay, _run)
+
+    @callback
+    def _cancel_cooling_restart_timer(self) -> None:
+        if self._cooling_restart_timer is not None:
+            self._cooling_restart_timer()
+            self._cooling_restart_timer = None
 
     @callback
     def _set_source_off_retry(self) -> None:

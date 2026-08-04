@@ -5,7 +5,7 @@ import unittest
 from collections import deque
 from time import monotonic
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 try:
     from homeassistant.components.climate.const import (
@@ -38,6 +38,7 @@ from custom_components.better_climate.const import (
     CONF_HEATING_ENTITY,
     CONF_HYSTERESIS,
     CONF_MIN_COMMAND_INTERVAL,
+    CONF_POWER_OFF_WHEN_COOLING_IDLE,
     CONF_TEMPERATURE_SENSOR,
 )
 
@@ -91,6 +92,7 @@ def make_entity(
     fan_supports_direction: bool = True,
     fan_percentage: int | None = None,
     fan_percentage_step: float = 25,
+    power_off_when_cooling_idle: bool = False,
 ) -> tuple[BetterClimate, FakeServices]:
     """Create a Better Climate entity with in-memory sources."""
     services = FakeServices()
@@ -130,6 +132,7 @@ def make_entity(
         CONF_HYSTERESIS: 0.3,
         CONF_FORCE_OFFSET: 0.5,
         CONF_MIN_COMMAND_INTERVAL: 30,
+        CONF_POWER_OFF_WHEN_COOLING_IDLE: power_off_when_cooling_idle,
     }
     if fan_state is not None:
         data[CONF_FAN] = FAN
@@ -519,6 +522,89 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(entity.hvac_mode, HVACMode.COOL)
         self.assertEqual(entity.hvac_action, HVACAction.IDLE)
+
+    async def test_optional_idle_power_off_waits_for_stable_target(self) -> None:
+        entity, _services = make_entity(
+            cooling_state=HVACMode.COOL,
+            sensor_state="24",
+            power_off_when_cooling_idle=True,
+        )
+        entity._idle_source_mode = HVACMode.COOL
+        entity._set_idle_cooling_off_timer = Mock()
+        entity._async_turn_source_off = AsyncMock()
+
+        await entity._async_reconcile(force=True)
+
+        entity._set_idle_cooling_off_timer.assert_called_once_with()
+        entity._async_turn_source_off.assert_not_awaited()
+
+    async def test_optional_idle_power_off_rechecks_target(self) -> None:
+        entity, _services = make_entity(
+            cooling_state=HVACMode.COOL,
+            sensor_state="24.1",
+            power_off_when_cooling_idle=True,
+        )
+        entity._idle_source_mode = HVACMode.COOL
+        entity._async_turn_source_off = AsyncMock()
+
+        await entity._async_power_off_idle_cooling()
+
+        entity._async_turn_source_off.assert_not_awaited()
+
+    async def test_optional_idle_power_off_turns_off_after_confirmation(self) -> None:
+        entity, _services = make_entity(
+            cooling_state=HVACMode.COOL,
+            sensor_state="24",
+            power_off_when_cooling_idle=True,
+        )
+        entity._idle_source_mode = HVACMode.COOL
+        entity._async_turn_source_off = AsyncMock()
+
+        with patch(
+            "custom_components.better_climate.climate.monotonic",
+            return_value=100,
+        ):
+            await entity._async_power_off_idle_cooling()
+
+        entity._async_turn_source_off.assert_awaited_once_with(COOLING)
+        self.assertEqual(entity._cooling_source_off_at, 100)
+
+    async def test_optional_idle_power_off_keeps_idle_source_off(self) -> None:
+        entity, _services = make_entity(
+            cooling_state=HVACMode.OFF,
+            sensor_state="24",
+            power_off_when_cooling_idle=True,
+        )
+        entity._idle_source_mode = HVACMode.COOL
+        entity._async_activate_cooling = AsyncMock()
+
+        await entity._async_reconcile(force=True)
+
+        entity._async_activate_cooling.assert_not_awaited()
+        self.assertEqual(entity.hvac_mode, HVACMode.COOL)
+        self.assertEqual(entity.hvac_action, HVACAction.IDLE)
+
+    async def test_optional_idle_power_off_guards_restart_for_three_minutes(
+        self,
+    ) -> None:
+        entity, _services = make_entity(
+            cooling_state=HVACMode.OFF,
+            sensor_state="24.5",
+            power_off_when_cooling_idle=True,
+        )
+        entity._idle_source_mode = HVACMode.COOL
+        entity._cooling_source_off_at = 100
+        entity._async_activate_cooling = AsyncMock()
+        entity._set_cooling_restart_timer = Mock()
+
+        with patch(
+            "custom_components.better_climate.climate.monotonic",
+            return_value=200,
+        ):
+            await entity._async_reconcile(force=True)
+
+        entity._async_activate_cooling.assert_not_awaited()
+        entity._set_cooling_restart_timer.assert_called_once_with(80)
 
     async def test_heating_idle_keeps_zone_on(self) -> None:
         entity, _services = make_entity(

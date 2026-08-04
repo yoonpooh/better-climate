@@ -12,7 +12,8 @@
           "temperature_sensor": "실내 온도 센서",
           "hysteresis": "온도 허용 범위",
           "force_offset": "기기 목표 온도 보정 폭",
-          "min_command_interval": "최소 명령 간격"
+          "min_command_interval": "최소 명령 간격",
+          "power_off_when_cooling_idle": "대기 상태에서 냉방기 전원 끄기"
         }
       },
       "reconfigure": {
@@ -26,7 +27,8 @@
           "temperature_sensor": "실내 온도 센서",
           "hysteresis": "온도 허용 범위",
           "force_offset": "기기 목표 온도 보정 폭",
-          "min_command_interval": "최소 명령 간격"
+          "min_command_interval": "최소 명령 간격",
+          "power_off_when_cooling_idle": "대기 상태에서 냉방기 전원 끄기"
         }
       }
     },

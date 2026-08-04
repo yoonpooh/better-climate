@@ -12,7 +12,8 @@
           "temperature_sensor": "Room temperature sensor",
           "hysteresis": "Temperature tolerance",
           "force_offset": "Device target offset",
-          "min_command_interval": "Minimum command interval"
+          "min_command_interval": "Minimum command interval",
+          "power_off_when_cooling_idle": "Turn off the cooling device while idle"
         }
       },
       "reconfigure": {
@@ -26,7 +27,8 @@
           "temperature_sensor": "Room temperature sensor",
           "hysteresis": "Temperature tolerance",
           "force_offset": "Device target offset",
-          "min_command_interval": "Minimum command interval"
+          "min_command_interval": "Minimum command interval",
+          "power_off_when_cooling_idle": "Turn off the cooling device while idle"
         }
       }
     },

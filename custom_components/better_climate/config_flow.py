@@ -31,10 +31,12 @@ from .const import (
     CONF_HEATING_ENTITY,
     CONF_HYSTERESIS,
     CONF_MIN_COMMAND_INTERVAL,
+    CONF_POWER_OFF_WHEN_COOLING_IDLE,
     CONF_TEMPERATURE_SENSOR,
     DEFAULT_FORCE_OFFSET,
     DEFAULT_HYSTERESIS,
     DEFAULT_MIN_COMMAND_INTERVAL,
+    DEFAULT_POWER_OFF_WHEN_COOLING_IDLE,
     DOMAIN,
 )
 
@@ -246,5 +248,12 @@ class BetterClimateConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         mode=NumberSelectorMode.BOX,
                     )
                 ),
+                vol.Optional(
+                    CONF_POWER_OFF_WHEN_COOLING_IDLE,
+                    default=defaults.get(
+                        CONF_POWER_OFF_WHEN_COOLING_IDLE,
+                        DEFAULT_POWER_OFF_WHEN_COOLING_IDLE,
+                    ),
+                ): bool,
             }
         )
