@@ -94,7 +94,7 @@ Go to **Settings > Devices & services > Add integration**, search for
 | Room temperature sensor | External room temperature | Required |
 | Room temperature hysteresis | Difference required before changing demand | `0.5 °C` |
 | Source force offset | Adjustment applied around the source temperature | `0.5 °C` |
-| Minimum command interval | Minimum time between source target commands | `30 s` |
+| Minimum command interval | Minimum time between source target commands | `10 s` |
 | Turn off cooling while idle | After the room remains at target for 5 minutes, power off cooling and protect restarts for 10 minutes | Disabled |
 
 The resulting entity is cooling-only when no boiler is selected.

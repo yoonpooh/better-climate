@@ -66,7 +66,7 @@ class ConfigFlowReconfigureTest(unittest.IsolatedAsyncioTestCase):
             CONF_FAN: FAN,
             CONF_HYSTERESIS: 0.3,
             CONF_FORCE_OFFSET: 0.5,
-            CONF_MIN_COMMAND_INTERVAL: 30,
+            CONF_MIN_COMMAND_INTERVAL: 10,
             CONF_POWER_OFF_WHEN_COOLING_IDLE: True,
         }
         result = {"type": "abort", "reason": "reconfigure_successful"}
