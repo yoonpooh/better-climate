@@ -95,7 +95,7 @@ Go to **Settings > Devices & services > Add integration**, search for
 | Room temperature hysteresis | Difference required before changing demand | `0.5 °C` |
 | Source force offset | Adjustment applied around the source temperature | `0.5 °C` |
 | Minimum command interval | Minimum time between source target commands | `30 s` |
-| Turn off cooling while idle | After the room remains at target for 30 seconds, power off cooling and protect restarts for 3 minutes | Disabled |
+| Turn off cooling while idle | After the room remains at target for 5 minutes, power off cooling and protect restarts for 10 minutes | Disabled |
 
 The resulting entity is cooling-only when no boiler is selected.
 
@@ -124,8 +124,8 @@ after saving.
 - A failed explicit power-off is retried every 30 seconds until it succeeds or
   the climate source is turned on again.
 - Idle normally keeps the selected source powered. When **Turn off cooling while
-  idle** is enabled, cooling powers off after 30 seconds at target and restarts
-  at target plus hysteresis after at least 3 minutes. Heating is unchanged.
+  idle** is enabled, cooling powers off after 5 minutes at target and restarts
+  at target plus hysteresis after at least 10 minutes. Heating is unchanged.
 - Invalid or unavailable sensor readings stop external correction and restore
   the virtual target to the active source.
 - A restored entity keeps its last target, active mode, and fan ownership.

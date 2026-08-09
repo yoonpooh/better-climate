@@ -90,9 +90,10 @@ ATTR_IDLE_SOURCE_MODE = "idle_source_mode"
 ATTR_LAST_REQUESTED_MODE = "last_requested_mode"
 DEFAULT_TARGET_LOW = 22
 SOURCE_OFF_RETRY_INTERVAL = 30
+SOURCE_STATE_TIMEOUT = 30
 DEFAULT_TARGET_HIGH = 25
-IDLE_COOLING_OFF_DELAY = 30
-COOLING_RESTART_DELAY = 180
+IDLE_COOLING_OFF_DELAY = 300
+COOLING_RESTART_DELAY = 600
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -729,7 +730,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             state = self.hass.states.get(entity_id)
             if state is None or state.state != HVACMode.OFF:
                 try:
-                    await asyncio.wait_for(stopped, timeout=10)
+                    await asyncio.wait_for(stopped, timeout=SOURCE_STATE_TIMEOUT)
                 except TimeoutError as err:
                     raise HomeAssistantError(f"{entity_id} did not turn off") from err
         finally:
@@ -924,7 +925,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 STATE_UNAVAILABLE,
             ):
                 try:
-                    await asyncio.wait_for(started, timeout=10)
+                    await asyncio.wait_for(started, timeout=SOURCE_STATE_TIMEOUT)
                 except TimeoutError as err:
                     raise HomeAssistantError(f"{entity_id} did not turn on") from err
         finally:

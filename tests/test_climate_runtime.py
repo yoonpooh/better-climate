@@ -616,7 +616,7 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entity.hvac_mode, HVACMode.COOL)
         self.assertEqual(entity.hvac_action, HVACAction.IDLE)
 
-    async def test_optional_idle_power_off_guards_restart_for_three_minutes(
+    async def test_optional_idle_power_off_guards_restart_for_ten_minutes(
         self,
     ) -> None:
         entity, _services = make_entity(
@@ -636,7 +636,7 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await entity._async_reconcile(force=True)
 
         entity._async_activate_cooling.assert_not_awaited()
-        entity._set_cooling_restart_timer.assert_called_once_with(80)
+        entity._set_cooling_restart_timer.assert_called_once_with(500)
 
     async def test_heating_idle_keeps_zone_on(self) -> None:
         entity, _services = make_entity(
