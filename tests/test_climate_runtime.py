@@ -616,6 +616,25 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entity.hvac_mode, HVACMode.COOL)
         self.assertEqual(entity.hvac_action, HVACAction.IDLE)
 
+    async def test_optional_idle_power_off_ignores_missing_source_temperature(
+        self,
+    ) -> None:
+        entity, services = make_entity(
+            cooling_state=HVACMode.OFF,
+            power_off_when_cooling_idle=True,
+        )
+        source = climate_state(COOLING, HVACMode.OFF)
+        attributes = dict(source.attributes)
+        attributes.pop("current_temperature")
+        entity.hass.states._states[COOLING] = State(COOLING, HVACMode.OFF, attributes)
+        entity._idle_source_mode = HVACMode.COOL
+        entity._async_activate_cooling = AsyncMock()
+
+        await entity._async_reconcile(force=True)
+
+        entity._async_activate_cooling.assert_not_awaited()
+        self.assertEqual(services.calls, [])
+
     async def test_optional_idle_power_off_guards_restart_for_ten_minutes(
         self,
     ) -> None:

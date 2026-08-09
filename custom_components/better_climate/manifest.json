@@ -7,5 +7,5 @@
   "integration_type": "device",
   "iot_class": "calculated",
   "requirements": [],
-  "version": "0.7.2"
+  "version": "0.7.3"
 }

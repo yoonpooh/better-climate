@@ -1234,6 +1234,9 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         self._cooling_required = False
         self._heating_required = False
         if source.state == HVACMode.OFF and self._idle_source_mode == mode:
+            if mode == HVACMode.COOL and self._power_off_when_cooling_idle:
+                self.async_write_ha_state()
+                return
             if mode == HVACMode.COOL:
                 await self._async_activate_cooling(reconcile=False)
             else:
