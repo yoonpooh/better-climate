@@ -36,6 +36,8 @@
       "entity_not_found": "The selected entity was not found.",
       "cool_not_supported": "The selected air conditioner does not support cool mode.",
       "heat_not_supported": "The selected boiler does not support heat mode.",
+      "off_not_supported": "The selected climate device does not support off mode.",
+      "target_temperature_not_supported": "The selected climate device does not support target-temperature control.",
       "sources_must_differ": "Cooling and heating must use different entities.",
       "temperature_ranges_do_not_overlap": "The cooling and heating target-temperature ranges do not overlap.",
       "temperature_not_available": "The selected entity does not provide a numeric temperature."

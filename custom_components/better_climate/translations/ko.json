@@ -36,6 +36,8 @@
       "entity_not_found": "선택한 엔티티를 찾을 수 없습니다.",
       "cool_not_supported": "선택한 에어컨은 냉방 모드를 지원하지 않습니다.",
       "heat_not_supported": "선택한 보일러는 난방 모드를 지원하지 않습니다.",
+      "off_not_supported": "선택한 온도조절 기기는 끄기 모드를 지원하지 않습니다.",
+      "target_temperature_not_supported": "선택한 온도조절 기기는 목표 온도 설정을 지원하지 않습니다.",
       "sources_must_differ": "냉방과 난방에는 서로 다른 엔티티를 선택해야 합니다.",
       "temperature_ranges_do_not_overlap": "냉방과 난방 장치의 목표 온도 범위가 겹치지 않습니다.",
       "temperature_not_available": "선택한 엔티티에서 숫자 온도를 읽을 수 없습니다."

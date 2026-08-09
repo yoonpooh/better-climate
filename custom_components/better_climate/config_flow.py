@@ -11,11 +11,12 @@ from homeassistant.components.climate.const import (
     ATTR_HVAC_MODES,
     ATTR_MAX_TEMP,
     ATTR_MIN_TEMP,
+    ClimateEntityFeature,
     HVACMode,
 )
 from homeassistant.components.fan import DOMAIN as FAN_DOMAIN
 from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
-from homeassistant.const import CONF_NAME
+from homeassistant.const import ATTR_SUPPORTED_FEATURES, CONF_NAME
 from homeassistant.helpers.selector import (
     EntitySelector,
     EntitySelectorConfig,
@@ -93,6 +94,12 @@ class BetterClimateConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors[CONF_COOLING_ENTITY] = "entity_not_found"
         elif HVACMode.COOL not in cooling.attributes.get(ATTR_HVAC_MODES, []):
             errors[CONF_COOLING_ENTITY] = "cool_not_supported"
+        elif HVACMode.OFF not in cooling.attributes.get(ATTR_HVAC_MODES, []):
+            errors[CONF_COOLING_ENTITY] = "off_not_supported"
+        elif not int(cooling.attributes.get(ATTR_SUPPORTED_FEATURES, 0)) & int(
+            ClimateEntityFeature.TARGET_TEMPERATURE
+        ):
+            errors[CONF_COOLING_ENTITY] = "target_temperature_not_supported"
         elif not isinstance(
             cooling.attributes.get("current_temperature"), (int, float)
         ) or not isfinite(float(cooling.attributes["current_temperature"])):
@@ -105,6 +112,12 @@ class BetterClimateConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors[CONF_HEATING_ENTITY] = "entity_not_found"
             elif HVACMode.HEAT not in heating.attributes.get(ATTR_HVAC_MODES, []):
                 errors[CONF_HEATING_ENTITY] = "heat_not_supported"
+            elif HVACMode.OFF not in heating.attributes.get(ATTR_HVAC_MODES, []):
+                errors[CONF_HEATING_ENTITY] = "off_not_supported"
+            elif not int(heating.attributes.get(ATTR_SUPPORTED_FEATURES, 0)) & int(
+                ClimateEntityFeature.TARGET_TEMPERATURE
+            ):
+                errors[CONF_HEATING_ENTITY] = "target_temperature_not_supported"
             elif not isinstance(
                 heating.attributes.get("current_temperature"),
                 (int, float),

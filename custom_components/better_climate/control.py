@@ -75,11 +75,11 @@ def calculate_control(
     else:
         cooling_required = room_temperature >= target_temperature + hysteresis
 
-    command = target_temperature
-    if cooling_required and internal_temperature <= target_temperature:
-        command = internal_temperature - force_offset
-    elif not cooling_required and internal_temperature >= target_temperature:
-        command = internal_temperature + force_offset
+    command = max(target_temperature, internal_temperature) + force_offset
+    if cooling_required:
+        command = target_temperature
+        if internal_temperature <= target_temperature:
+            command = internal_temperature - force_offset
 
     return ControlResult(
         cooling_required,
@@ -110,11 +110,11 @@ def calculate_heating_control(
     else:
         heating_required = room_temperature <= target_temperature - hysteresis
 
-    command = target_temperature
-    if heating_required and internal_temperature >= target_temperature:
-        command = internal_temperature + force_offset
-    elif not heating_required and internal_temperature <= target_temperature:
-        command = internal_temperature - force_offset
+    command = min(target_temperature, internal_temperature) - force_offset
+    if heating_required:
+        command = target_temperature
+        if internal_temperature >= target_temperature:
+            command = internal_temperature + force_offset
 
     return HeatingControlResult(
         heating_required=heating_required,

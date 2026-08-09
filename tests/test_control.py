@@ -49,7 +49,7 @@ class ControlTest(unittest.TestCase):
             step=0.5,
         )
         self.assertFalse(result.cooling_required)
-        self.assertEqual(result.command_temperature, 24.0)
+        self.assertEqual(result.command_temperature, 24.5)
 
     def test_holds_state_inside_hysteresis_band(self) -> None:
         result = calculate_control(
@@ -65,6 +65,24 @@ class ControlTest(unittest.TestCase):
         )
         self.assertFalse(result.cooling_required)
         self.assertEqual(result.command_temperature, 24.5)
+
+    def test_idle_setpoint_is_stable_across_internal_sensor_rounding(self) -> None:
+        commands = {
+            calculate_control(
+                room_temperature=24.1,
+                target_temperature=24.0,
+                internal_temperature=internal,
+                cooling_required=False,
+                hysteresis=0.3,
+                force_offset=0.5,
+                minimum=18,
+                maximum=30,
+                step=0.5,
+            ).command_temperature
+            for internal in (23.5, 24.0)
+        }
+
+        self.assertEqual(commands, {24.5})
 
     def test_forces_cooling_off_when_internal_sensor_is_high(self) -> None:
         result = calculate_control(

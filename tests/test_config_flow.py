@@ -5,7 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 try:
-    from homeassistant.components.climate.const import HVACMode
+    from homeassistant.components.climate.const import ClimateEntityFeature, HVACMode
+    from homeassistant.const import ATTR_SUPPORTED_FEATURES
     from homeassistant.core import State
 except ModuleNotFoundError as err:
     raise unittest.SkipTest("Home Assistant is not installed") from err
@@ -37,6 +38,9 @@ class ConfigFlowValidationTest(unittest.TestCase):
                 {
                     "hvac_modes": [HVACMode.OFF, HVACMode.COOL],
                     "current_temperature": 24,
+                    ATTR_SUPPORTED_FEATURES: int(
+                        ClimateEntityFeature.TARGET_TEMPERATURE
+                    ),
                 },
             ),
             SENSOR: State(SENSOR, "24"),
@@ -52,6 +56,48 @@ class ConfigFlowValidationTest(unittest.TestCase):
         }
 
         self.assertEqual(BetterClimateConfigFlow._validate(flow, data), {})
+
+    def test_climate_source_requires_off_and_target_temperature(self) -> None:
+        states = {
+            COOLING: State(
+                COOLING,
+                HVACMode.COOL,
+                {
+                    "hvac_modes": [HVACMode.COOL],
+                    "current_temperature": 24,
+                    ATTR_SUPPORTED_FEATURES: int(
+                        ClimateEntityFeature.TARGET_TEMPERATURE
+                    ),
+                },
+            ),
+            SENSOR: State(SENSOR, "24"),
+        }
+        flow = SimpleNamespace(
+            hass=SimpleNamespace(states=SimpleNamespace(get=states.get))
+        )
+        data = {
+            CONF_COOLING_ENTITY: COOLING,
+            CONF_TEMPERATURE_SENSOR: SENSOR,
+        }
+
+        self.assertEqual(
+            BetterClimateConfigFlow._validate(flow, data)[CONF_COOLING_ENTITY],
+            "off_not_supported",
+        )
+
+        states[COOLING] = State(
+            COOLING,
+            HVACMode.OFF,
+            {
+                "hvac_modes": [HVACMode.OFF, HVACMode.COOL],
+                "current_temperature": 24,
+                ATTR_SUPPORTED_FEATURES: 0,
+            },
+        )
+        self.assertEqual(
+            BetterClimateConfigFlow._validate(flow, data)[CONF_COOLING_ENTITY],
+            "target_temperature_not_supported",
+        )
 
 
 class ConfigFlowReconfigureTest(unittest.IsolatedAsyncioTestCase):

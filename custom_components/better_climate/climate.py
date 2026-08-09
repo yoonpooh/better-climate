@@ -7,11 +7,12 @@ import logging
 from collections import deque
 from collections.abc import Callable
 from math import ceil, floor, isfinite
-from time import monotonic
+from time import monotonic, time
 
 from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import (
     ATTR_HVAC_ACTION,
+    ATTR_HVAC_MODE,
     ATTR_MAX_TEMP,
     ATTR_MIN_TEMP,
     ATTR_TARGET_TEMP_HIGH,
@@ -88,6 +89,7 @@ ATTR_FAN_OWNED = "fan_owned"
 ATTR_FAN_MANUAL_OFF_MODE = "fan_manual_off_mode"
 ATTR_IDLE_SOURCE_MODE = "idle_source_mode"
 ATTR_LAST_REQUESTED_MODE = "last_requested_mode"
+ATTR_COOLING_RESTART_AT = "cooling_restart_at"
 DEFAULT_TARGET_LOW = 22
 SOURCE_OFF_RETRY_INTERVAL = 30
 SOURCE_STATE_TIMEOUT = 30
@@ -156,7 +158,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         self._pending_timer: Callable[[], None] | None = None
         self._idle_cooling_off_timer: Callable[[], None] | None = None
         self._cooling_restart_timer: Callable[[], None] | None = None
-        self._cooling_source_off_at = 0.0
+        self._cooling_restart_at = 0.0
         self._control_lock = asyncio.Lock()
         self._transition_lock = asyncio.Lock()
 
@@ -206,9 +208,18 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 self._last_requested_mode = HVACMode(restored_requested_mode)
             restored_idle_mode = restored.attributes.get(ATTR_IDLE_SOURCE_MODE)
             if restored_idle_mode in (HVACMode.COOL, HVACMode.HEAT):
-                self._idle_source_mode = HVACMode(restored_idle_mode)
-            elif restored.state in (HVACMode.COOL, HVACMode.HEAT):
+                if (
+                    restored_idle_mode != HVACMode.HEAT
+                    or self._heating_entity is not None
+                ):
+                    self._idle_source_mode = HVACMode(restored_idle_mode)
+            elif restored.state in (HVACMode.COOL, HVACMode.HEAT) and (
+                restored.state != HVACMode.HEAT or self._heating_entity is not None
+            ):
                 self._idle_source_mode = HVACMode(restored.state)
+            restored_restart_at = restored.attributes.get(ATTR_COOLING_RESTART_AT)
+            if isinstance(restored_restart_at, (int, float)):
+                self._cooling_restart_at = max(float(restored_restart_at), 0.0)
             self._fan_owned = restored.attributes.get(ATTR_FAN_OWNED) is True
             restored_fan_manual_off_mode = restored.attributes.get(
                 ATTR_FAN_MANUAL_OFF_MODE
@@ -247,7 +258,12 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         """Initialize the virtual target from the source or room sensor."""
         if self._target_temperature is not None:
             return
-        source_target = self._source_attribute(self._cooling_source, ATTR_TEMPERATURE)
+        source = (
+            self._heating_source
+            if self._source_hvac_mode() == HVACMode.HEAT
+            else self._cooling_source
+        )
+        source_target = self._source_attribute(source, ATTR_TEMPERATURE)
         if isinstance(source_target, (int, float)):
             self._target_temperature = self._normalize_target(float(source_target))
             return
@@ -493,6 +509,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             "command_temperature": self._active_source_temperature,
             "last_requested_temperature": (self._last_requested_temperature),
             CONF_POWER_OFF_WHEN_COOLING_IDLE: self._power_off_when_cooling_idle,
+            ATTR_COOLING_RESTART_AT: self._cooling_restart_at or None,
         }
 
     @staticmethod
@@ -519,6 +536,15 @@ class BetterClimate(ClimateEntity, RestoreEntity):
 
     async def async_set_temperature(self, **kwargs) -> None:
         """Set the virtual room target."""
+        requested_mode = kwargs.get(ATTR_HVAC_MODE)
+        mode = None
+        if requested_mode is not None:
+            try:
+                mode = HVACMode(requested_mode)
+            except ValueError as err:
+                raise HomeAssistantError("Invalid HVAC mode") from err
+            if mode not in self.hvac_modes:
+                raise HomeAssistantError(f"Unsupported HVAC mode: {mode}")
         target_low = kwargs.get(ATTR_TARGET_TEMP_LOW)
         target_high = kwargs.get(ATTR_TARGET_TEMP_HIGH)
         if target_low is not None or target_high is not None:
@@ -546,18 +572,24 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             self._target_temperature_low = low
             self._target_temperature_high = high
             self.async_write_ha_state()
-            if self.hvac_mode == HVACMode.HEAT_COOL:
+            if mode is not None:
+                await self.async_set_hvac_mode(mode)
+            elif self.hvac_mode == HVACMode.HEAT_COOL:
                 await self._async_reconcile(force=True)
             return
         temperature = kwargs.get(ATTR_TEMPERATURE)
         if temperature is None:
+            if mode is not None:
+                await self.async_set_hvac_mode(mode)
             return
         try:
             self._target_temperature = self._normalize_target(float(temperature))
         except (OverflowError, TypeError, ValueError) as err:
             raise HomeAssistantError("Invalid target temperature") from err
         self.async_write_ha_state()
-        if self.hvac_mode in (HVACMode.COOL, HVACMode.HEAT):
+        if mode is not None:
+            await self.async_set_hvac_mode(mode)
+        elif self.hvac_mode in (HVACMode.COOL, HVACMode.HEAT):
             await self._async_reconcile(force=True)
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
@@ -608,6 +640,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
     async def _async_activate_cooling_locked(self) -> None:
         """Enable cooling while holding the transition lock."""
         self._cancel_source_off_retry()
+        self._cancel_idle_cooling_off_timer()
         if not self._is_available(self._cooling_source):
             raise HomeAssistantError("Cooling source is unavailable")
         self._last_active_mode = HVACMode.COOL
@@ -616,7 +649,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         if self._heating_entity is not None:
             await self._async_turn_source_off(self._heating_entity)
         await self._async_set_source_mode(self._cooling_entity, HVACMode.COOL)
-        self._cooling_source_off_at = 0.0
+        self._cooling_restart_at = 0.0
         self._cancel_cooling_restart_timer()
         self._idle_source_mode = HVACMode.COOL
         await self._async_sync_ceiling_fan(HVACMode.COOL, adopt=True)
@@ -632,6 +665,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
     async def _async_activate_heating_locked(self) -> None:
         """Enable heating while holding the transition lock."""
         self._cancel_source_off_retry()
+        self._cancel_idle_cooling_off_timer()
         if self._heating_entity is None:
             raise HomeAssistantError("Heating source is not configured")
         if not self._is_available(self._heating_source):
@@ -1062,25 +1096,27 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         self.hass.async_create_task(self._async_reconcile(force=force))
 
     async def _async_reconcile(self, force: bool = False) -> None:
+        self._ensure_target_temperature()
+        self._ensure_target_range()
         virtual_mode = self.hvac_mode
         selected_mode = self._source_hvac_mode() or self._idle_source_mode
         if virtual_mode == HVACMode.HEAT_COOL:
             if (
                 self._target_temperature_low is None
                 or self._target_temperature_high is None
-                or self.current_temperature is None
             ):
                 return
-            selected_mode = HVACMode(
-                select_heat_cool_mode(
-                    room_temperature=self.current_temperature,
-                    target_low=self._target_temperature_low,
-                    target_high=self._target_temperature_high,
-                    hysteresis=self._hysteresis,
-                    active_mode=selected_mode,
-                    last_active_mode=self._last_active_mode,
+            if self.current_temperature is not None:
+                selected_mode = HVACMode(
+                    select_heat_cool_mode(
+                        room_temperature=self.current_temperature,
+                        target_low=self._target_temperature_low,
+                        target_high=self._target_temperature_high,
+                        hysteresis=self._hysteresis,
+                        active_mode=selected_mode,
+                        last_active_mode=self._last_active_mode,
+                    )
                 )
-            )
         async with self._control_lock:
             mode = selected_mode if virtual_mode == HVACMode.HEAT_COOL else virtual_mode
             if mode != HVACMode.COOL:
@@ -1166,20 +1202,16 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 if self._cooling_required:
                     self._cancel_idle_cooling_off_timer()
                 elif source.state == HVACMode.COOL:
-                    if room <= normalized_target:
-                        self._set_idle_cooling_off_timer()
-                    else:
-                        self._cancel_idle_cooling_off_timer()
+                    self._set_idle_cooling_off_timer()
                 else:
                     self._cancel_idle_cooling_off_timer()
                     return
 
+            activated_source = False
             if source.state != mode:
                 if mode == HVACMode.COOL and self._power_off_when_cooling_idle:
-                    remaining = COOLING_RESTART_DELAY - (
-                        monotonic() - self._cooling_source_off_at
-                    )
-                    if self._cooling_source_off_at and remaining > 0:
+                    remaining = self._cooling_restart_at - time()
+                    if remaining > 0:
                         self._set_cooling_restart_timer(remaining)
                         return
                 if mode == HVACMode.COOL:
@@ -1191,6 +1223,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                     self._last_requested_mode = HVACMode.HEAT_COOL
                 self._idle_source_mode = mode
                 self.async_write_ha_state()
+                activated_source = True
 
             current_command = source.attributes.get(ATTR_TEMPERATURE)
             source_step = self._source_temperature_step(source)
@@ -1201,7 +1234,11 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 return
 
             elapsed = monotonic() - self._last_command_at
-            if not force and elapsed < self._min_command_interval:
+            if (
+                not force
+                and not activated_source
+                and elapsed < self._min_command_interval
+            ):
                 self._set_pending_timer(self._min_command_interval - elapsed)
                 return
 
@@ -1303,7 +1340,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             self._idle_cooling_off_timer = None
 
     async def _async_power_off_idle_cooling(self) -> None:
-        async with self._control_lock:
+        async with self._control_lock, self._transition_lock:
             room = self.current_temperature
             target = self._control_target_for_mode(HVACMode.COOL)
             if (
@@ -1314,7 +1351,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 or self._cooling_source.state != HVACMode.COOL
                 or room is None
                 or target is None
-                or room > target
+                or room >= target + self._hysteresis
                 or self._cooling_required
             ):
                 return
@@ -1323,7 +1360,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             except HomeAssistantError:
                 self._set_idle_cooling_off_timer(SOURCE_OFF_RETRY_INTERVAL)
                 return
-            self._cooling_source_off_at = monotonic()
+            self._cooling_restart_at = time() + COOLING_RESTART_DELAY
             self.async_write_ha_state()
 
     @callback
@@ -1363,6 +1400,8 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             return
         try:
             async with self._transition_lock:
+                if not self._source_off_requested:
+                    return
                 await self._async_turn_off_locked()
         except HomeAssistantError:
             self._set_source_off_retry()
