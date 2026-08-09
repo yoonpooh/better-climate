@@ -336,6 +336,38 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entity._async_turn_source_off.await_count, 4)
         self.assertIsNone(entity._source_off_retry_timer)
 
+    async def test_turn_off_retries_once_when_sources_were_cached_off(self) -> None:
+        entity, _services = make_entity()
+        entity._async_turn_source_off = AsyncMock()
+        tasks = []
+        entity.hass.async_create_task = tasks.append
+
+        with patch(
+            "custom_components.better_climate.climate.async_call_later",
+            return_value=lambda: None,
+        ) as call_later:
+            await entity.async_turn_off()
+
+            self.assertEqual(call_later.call_count, 1)
+            self.assertEqual(call_later.call_args.args[1], SOURCE_OFF_RETRY_INTERVAL)
+            call_later.call_args.args[2](None)
+            await tasks.pop()
+
+        self.assertEqual(entity._async_turn_source_off.await_count, 4)
+        self.assertIsNone(entity._source_off_retry_timer)
+
+    async def test_turn_off_does_not_retry_after_confirmed_transition(self) -> None:
+        entity, _services = make_entity(cooling_state=HVACMode.COOL)
+        entity._async_turn_source_off = AsyncMock()
+
+        with patch(
+            "custom_components.better_climate.climate.async_call_later",
+            return_value=lambda: None,
+        ) as call_later:
+            await entity.async_turn_off()
+
+        call_later.assert_not_called()
+
     async def test_power_services_wrap_source_mode_changes(self) -> None:
         entity, services = make_entity(cooling_state=HVACMode.OFF)
         entity.hass.states._states[COOLING] = climate_state(

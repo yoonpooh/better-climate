@@ -650,12 +650,22 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         self._source_off_requested = True
         self._heat_cool_enabled = False
         self._idle_source_mode = None
+        source_entities = [self._cooling_entity]
+        if self._heating_entity is not None:
+            source_entities.append(self._heating_entity)
+        sources_were_cached_off = all(
+            (state := self.hass.states.get(entity_id)) is not None
+            and state.state == HVACMode.OFF
+            for entity_id in source_entities
+        )
         try:
             async with self._transition_lock:
                 await self._async_turn_off_locked()
         except HomeAssistantError:
             self._set_source_off_retry()
             raise
+        if sources_were_cached_off:
+            self._set_source_off_retry()
 
     async def _async_turn_off_locked(self) -> None:
         """Turn off every source while holding the transition lock."""
