@@ -1031,16 +1031,25 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_recovery_does_not_adopt_stale_source_target(self) -> None:
         entity, _services = make_entity()
-        event = Event(
+        recovery = Event(
             "state_changed",
             {
                 "entity_id": COOLING,
                 "old_state": State(COOLING, "unavailable"),
+                "new_state": State(COOLING, "unknown"),
+            },
+        )
+        hydration = Event(
+            "state_changed",
+            {
+                "entity_id": COOLING,
+                "old_state": climate_state(COOLING, HVACMode.COOL, temperature=None),
                 "new_state": climate_state(COOLING, HVACMode.COOL, temperature=23.5),
             },
         )
 
-        self.assertFalse(entity._sync_target_from_event(event))
+        self.assertFalse(entity._sync_target_from_event(recovery))
+        self.assertFalse(entity._sync_target_from_event(hydration))
         self.assertEqual(entity.target_temperature, 24)
 
     async def test_ceiling_fan_follows_hvac_mode_and_ignores_idle(self) -> None:

@@ -148,6 +148,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         self._last_requested_temperature: float | None = None
         self._expected_source_temperatures: dict[str, deque[tuple[float, float]]] = {}
         self._expected_source_modes: dict[str, tuple[HVACMode, float]] = {}
+        self._recovering_sources: set[str] = set()
         self._fan_owned = False
         self._fan_manual_off_mode: HVACMode | None = None
         self._ceiling_fan_target: tuple[HVACMode, int | None] | None = None
@@ -991,6 +992,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         if old_state is None or new_state is None:
             return False
         if not self._is_available(old_state):
+            self._recovering_sources.add(entity_id)
             return False
         if self._transition_lock.locked() and old_state.state != new_state.state:
             return False
@@ -1000,6 +1002,9 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             return False
         new_target = float(new_target)
         if not isfinite(new_target):
+            return False
+        if entity_id in self._recovering_sources:
+            self._recovering_sources.remove(entity_id)
             return False
 
         step = self._source_temperature_step(new_state)
