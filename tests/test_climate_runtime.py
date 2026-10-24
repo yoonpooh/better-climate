@@ -3,6 +3,7 @@
 import asyncio
 import unittest
 from collections import deque
+from math import floor
 from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -67,7 +68,13 @@ class FakeServices:
         self.calls = []
 
     async def async_call(
-        self, domain: str, service: str, data: dict, *, blocking: bool
+        self,
+        domain: str,
+        service: str,
+        data: dict,
+        *,
+        blocking: bool,
+        context=None,
     ) -> None:
         self.calls.append((domain, service, data, blocking))
 
@@ -419,7 +426,12 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
 
         async def call_service(
-            domain: str, service: str, data: dict, *, blocking: bool
+            domain: str,
+            service: str,
+            data: dict,
+            *,
+            blocking: bool,
+            context=None,
         ) -> None:
             services.calls.append((domain, service, data, blocking))
             if service == "turn_on":
@@ -1388,3 +1400,333 @@ class BetterClimateRuntimeTest(unittest.IsolatedAsyncioTestCase):
             services.calls,
             [("fan", "turn_on", {"entity_id": FAN}, True)],
         )
+
+
+def _temperature_calls(services: FakeServices, entity_id: str | None = None) -> list:
+    return [
+        call
+        for call in services.calls
+        if call[1] == "set_temperature"
+        and (entity_id is None or call[2].get("entity_id") == entity_id)
+    ]
+
+
+def _heating_state(state: str, temperature: float, **attributes) -> State:
+    return climate_state(
+        HEATING,
+        state,
+        temperature=temperature,
+        current_temperature=24.0,
+        min_temp=5,
+        max_temp=40,
+        target_temp_step=0.5,
+        supported_features=1,
+        **attributes,
+    )
+
+
+class CoarseHeatingRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    """Sources that advertise 0.5 but apply whole degrees must settle."""
+
+    def _entity(self, sensor_state: str = "25.4") -> tuple[BetterClimate, FakeServices]:
+        entity, services = make_entity(
+            heating_state=HVACMode.HEAT,
+            sensor_state=sensor_state,
+        )
+        entity._hysteresis = 0.5
+        entity._force_offset = 0.5
+        entity._min_command_interval = 10
+        entity._target_temperature = 25
+        entity._last_active_mode = HVACMode.HEAT
+        entity._last_requested_mode = HVACMode.HEAT
+        entity._idle_source_mode = HVACMode.HEAT
+        entity.hass.states._states[COOLING] = climate_state(
+            COOLING,
+            HVACMode.OFF,
+            min_temp=16,
+            max_temp=30,
+            target_temp_step=0.5,
+        )
+        entity.hass.states._states[HEATING] = _heating_state(HVACMode.HEAT, 22.0)
+        return entity, services
+
+    def _apply_temperature(
+        self,
+        entity: BetterClimate,
+        old_temperature: float,
+        new_temperature: float,
+    ) -> bool:
+        old_state = _heating_state(HVACMode.HEAT, old_temperature)
+        new_state = _heating_state(HVACMode.HEAT, new_temperature)
+        entity.hass.states._states[HEATING] = new_state
+        return entity._sync_target_from_event(
+            Event(
+                "state_changed",
+                {
+                    "entity_id": HEATING,
+                    "old_state": old_state,
+                    "new_state": new_state,
+                },
+            )
+        )
+
+    async def test_floored_heating_commands_do_not_walk_or_repeat(self) -> None:
+        entity, services = self._entity()
+
+        await entity._async_reconcile(force=True)
+        self.assertEqual(
+            _temperature_calls(services),
+            [
+                (
+                    "climate",
+                    "set_temperature",
+                    {"entity_id": HEATING, "temperature": 23.5},
+                    True,
+                ),
+            ],
+        )
+
+        for _ in range(6):
+            commanded = _temperature_calls(services)[-1][2]["temperature"]
+            previous = entity.hass.states.get(HEATING)
+            assert previous is not None
+            previous_temperature = float(previous.attributes["temperature"])
+            self.assertFalse(
+                self._apply_temperature(entity, previous_temperature, commanded)
+            )
+            applied = float(floor(commanded))
+            self.assertFalse(self._apply_temperature(entity, commanded, applied))
+            await entity._async_reconcile(force=True)
+            await entity._async_reconcile(force=True)
+            if len(_temperature_calls(services)) == 1:
+                break
+
+        self.assertEqual(entity.target_temperature, 25)
+        self.assertEqual(len(_temperature_calls(services)), 1)
+        self.assertEqual(entity.hvac_mode, HVACMode.HEAT)
+
+    async def test_rounded_up_heating_commands_settle_on_the_virtual_target(
+        self,
+    ) -> None:
+        entity, services = self._entity()
+
+        await entity._async_reconcile(force=True)
+        commanded = _temperature_calls(services)[-1][2]["temperature"]
+        self.assertEqual(commanded, 23.5)
+        applied = float(floor(commanded + 0.5))
+        self.assertFalse(self._apply_temperature(entity, 22.0, commanded))
+        self.assertFalse(self._apply_temperature(entity, commanded, applied))
+
+        await entity._async_reconcile(force=True)
+        await entity._async_reconcile(force=True)
+
+        self.assertEqual(entity.target_temperature, 25)
+        self.assertEqual(len(_temperature_calls(services)), 1)
+        heating = entity.hass.states.get(HEATING)
+        assert heating is not None
+        self.assertEqual(heating.attributes["temperature"], 24.0)
+
+    async def test_manual_heating_target_is_still_adopted(self) -> None:
+        entity, services = self._entity()
+        await entity._async_reconcile(force=True)
+        self.assertFalse(self._apply_temperature(entity, 22.0, 23.5))
+        self.assertFalse(self._apply_temperature(entity, 23.5, 23.0))
+        await entity._async_reconcile(force=True)
+
+        calls_before_manual_change = len(_temperature_calls(services))
+        self.assertTrue(self._apply_temperature(entity, 23.0, 21.0))
+
+        self.assertEqual(entity.target_temperature, 21.0)
+        self.assertEqual(len(_temperature_calls(services)), calls_before_manual_change)
+
+    async def test_precise_cooling_source_still_adopts_a_manual_half_step(self) -> None:
+        entity, _services = make_entity(cooling_state=HVACMode.COOL)
+        entity._target_temperature = 24
+        observed = Event(
+            "state_changed",
+            {
+                "entity_id": COOLING,
+                "old_state": climate_state(COOLING, HVACMode.COOL, temperature=24),
+                "new_state": climate_state(COOLING, HVACMode.COOL, temperature=24.5),
+            },
+        )
+
+        self.assertTrue(entity._sync_target_from_event(observed))
+        self.assertEqual(entity.target_temperature, 24.5)
+        self.assertIn(COOLING, entity._source_honors_step)
+
+        entity._expected_source_temperatures[COOLING] = deque(
+            [(23.5, monotonic())], maxlen=8
+        )
+        manual = Event(
+            "state_changed",
+            {
+                "entity_id": COOLING,
+                "old_state": climate_state(COOLING, HVACMode.COOL, temperature=24.5),
+                "new_state": climate_state(COOLING, HVACMode.COOL, temperature=23.0),
+            },
+        )
+
+        self.assertTrue(entity._sync_target_from_event(manual))
+        self.assertEqual(entity.target_temperature, 23.0)
+        self.assertNotIn(COOLING, entity._source_coarse)
+
+
+class HeatingOffEchoTest(unittest.IsolatedAsyncioTestCase):
+    """Turning the virtual entity off must survive a stale heating echo."""
+
+    def _prepare(self) -> tuple[BetterClimate, FakeServices, list]:
+        entity, services = make_entity(
+            heating_state=HVACMode.HEAT,
+            sensor_state="25.4",
+        )
+        entity._hysteresis = 0.5
+        entity._force_offset = 0.5
+        entity._target_temperature = 16
+        entity._last_active_mode = HVACMode.HEAT
+        entity._last_requested_mode = HVACMode.HEAT
+        entity._idle_source_mode = HVACMode.HEAT
+        entity.hass.states._states[COOLING] = climate_state(
+            COOLING,
+            HVACMode.OFF,
+            min_temp=16,
+            max_temp=30,
+            target_temp_step=0.5,
+            supported_features=int(ClimateEntityFeature.TURN_OFF),
+        )
+        entity.hass.states._states[HEATING] = _heating_state(HVACMode.HEAT, 15.5)
+        tasks: list[asyncio.Task] = []
+
+        def create_task(coro):
+            task = asyncio.ensure_future(coro)
+            tasks.append(task)
+            return task
+
+        entity.hass.async_create_task = create_task
+
+        async def async_call(domain, service, data, *, blocking, context=None):
+            services.calls.append((domain, service, data, blocking))
+            entity_id = data["entity_id"]
+            current = entity.hass.states.get(entity_id)
+            attributes = dict(current.attributes) if current is not None else {}
+            if service == "set_temperature":
+                attributes["temperature"] = data["temperature"]
+                entity.hass.states._states[entity_id] = State(
+                    entity_id, HVACMode.HEAT, attributes
+                )
+                return
+            if service == "turn_off" or (
+                service == "set_hvac_mode" and data.get("hvac_mode") == HVACMode.OFF
+            ):
+                entity.hass.states._states[entity_id] = State(
+                    entity_id, HVACMode.OFF, attributes
+                )
+
+        services.async_call = async_call
+        return entity, services, tasks
+
+    async def _turn_off(self, entity: BetterClimate) -> None:
+        with patch(
+            "custom_components.better_climate.climate.async_track_state_change_event",
+            return_value=lambda: None,
+        ):
+            await entity.async_turn_off()
+
+    async def _bounce_heating(
+        self,
+        entity: BetterClimate,
+        tasks: list,
+        *,
+        context=None,
+        temperature: float = 15.5,
+    ) -> None:
+        old_state = entity.hass.states.get(HEATING)
+        new_state = _heating_state(HVACMode.HEAT, temperature)
+        entity.hass.states._states[HEATING] = new_state
+        event = Event(
+            "state_changed",
+            {
+                "entity_id": HEATING,
+                "old_state": old_state,
+                "new_state": new_state,
+            },
+            context=context,
+        )
+        with patch(
+            "custom_components.better_climate.climate.async_track_state_change_event",
+            return_value=lambda: None,
+        ):
+            entity._async_source_changed(event)
+            if tasks:
+                await asyncio.gather(*tasks)
+                tasks.clear()
+
+    async def test_stale_heat_echo_after_off_does_not_restart_the_loop(self) -> None:
+        entity, services, tasks = self._prepare()
+        await self._turn_off(entity)
+        self.assertEqual(entity.hvac_mode, HVACMode.OFF)
+        services.calls.clear()
+
+        await self._bounce_heating(entity, tasks)
+        await entity._async_reconcile(force=True)
+
+        self.assertEqual(entity.hvac_mode, HVACMode.OFF)
+        self.assertEqual(entity.target_temperature, 16)
+        self.assertEqual(_temperature_calls(services), [])
+        self.assertTrue(
+            any(
+                service == "set_hvac_mode"
+                and data.get("entity_id") == HEATING
+                and data.get("hvac_mode") == HVACMode.OFF
+                for _domain, service, data, _blocking in services.calls
+            )
+        )
+
+    async def test_in_flight_temperature_cannot_turn_heating_back_on(self) -> None:
+        entity, services, tasks = self._prepare()
+        await self._turn_off(entity)
+        services.calls.clear()
+        entity._off_guard_until = monotonic() - 1
+        entity._temperature_commands_in_flight = 1
+        entity._expected_source_temperatures[HEATING] = deque(
+            [(15.5, monotonic())], maxlen=8
+        )
+
+        await self._bounce_heating(entity, tasks, temperature=15.0)
+        entity._temperature_commands_in_flight = 0
+        await entity._async_reconcile(force=True)
+
+        self.assertEqual(entity.hvac_mode, HVACMode.OFF)
+        self.assertEqual(entity.target_temperature, 16)
+        self.assertEqual(_temperature_calls(services), [])
+        heating = entity.hass.states.get(HEATING)
+        assert heating is not None
+        self.assertEqual(heating.state, HVACMode.OFF)
+
+    async def test_command_context_echo_after_the_guard_stays_off(self) -> None:
+        from homeassistant.core import Context
+
+        entity, services, tasks = self._prepare()
+        await self._turn_off(entity)
+        services.calls.clear()
+        entity._off_guard_until = monotonic() - 1
+        context = Context()
+        entity._recent_command_context_ids.append(context.id)
+
+        await self._bounce_heating(entity, tasks, context=context)
+
+        self.assertEqual(entity.hvac_mode, HVACMode.OFF)
+        self.assertEqual(entity.target_temperature, 16)
+        self.assertEqual(_temperature_calls(services), [])
+
+    async def test_later_manual_heat_request_is_adopted(self) -> None:
+        entity, _services, tasks = self._prepare()
+        await self._turn_off(entity)
+        entity._off_guard_until = monotonic() - 1
+        entity._temperature_commands_in_flight = 0
+
+        await self._bounce_heating(entity, tasks, temperature=22.0)
+
+        self.assertEqual(entity.hvac_mode, HVACMode.HEAT)
+        self.assertEqual(entity.target_temperature, 22.0)
+        self.assertFalse(entity._source_off_requested)
