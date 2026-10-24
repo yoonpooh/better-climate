@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from math import ceil, floor, isfinite
 from time import monotonic, time
 
@@ -48,6 +48,7 @@ from homeassistant.const import (
     STATE_UNKNOWN,
 )
 from homeassistant.core import (
+    Context,
     Event,
     EventStateChangedData,
     HomeAssistant,
@@ -77,11 +78,18 @@ from .control import (
     calculate_control,
     calculate_heating_control,
     evaluate_source_target_change,
+    has_finer_resolution,
+    learn_quantizer,
+    matches_coarse_command,
     round_and_clamp,
     select_heat_cool_mode,
+    source_reported_command,
 )
 
 EXPECTED_TARGET_TTL = 120
+COARSE_RESOLUTION_WINDOW = 15
+OFF_REACTIVATION_GUARD = 5
+MAX_STALE_REOFFS = 3
 MAX_EXPECTED_TARGETS = 8
 FAN_SPEED_STEP = 0.5
 FAN_SPEED_HYSTERESIS = 0.1
@@ -148,6 +156,13 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         self._last_requested_temperature: float | None = None
         self._expected_source_temperatures: dict[str, deque[tuple[float, float]]] = {}
         self._expected_source_modes: dict[str, tuple[HVACMode, float]] = {}
+        self._source_honors_step: set[str] = set()
+        self._source_coarse: set[str] = set()
+        self._source_quantizer: dict[str, str] = {}
+        self._off_guard_until = 0.0
+        self._stale_reoff_count = 0
+        self._temperature_commands_in_flight = 0
+        self._recent_command_context_ids: deque[str] = deque(maxlen=16)
         self._recovering_sources: set[str] = set()
         self._fan_owned = False
         self._fan_manual_off_mode: HVACMode | None = None
@@ -425,7 +440,52 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         """Return the active source mode."""
         if self._heat_cool_enabled:
             return HVACMode.HEAT_COOL
+        if self._user_wants_sources_off():
+            return HVACMode.OFF
         return self._source_hvac_mode() or self._idle_source_mode or HVACMode.OFF
+
+    def _user_wants_sources_off(self) -> bool:
+        """Return whether the virtual entity was turned off and has stayed off."""
+        return (
+            self._source_off_requested
+            and self._idle_source_mode is None
+            and not self._heat_cool_enabled
+        )
+
+    def _off_guard_active(self) -> bool:
+        """Return whether a just-finished off command can still echo back on."""
+        return self._user_wants_sources_off() and (
+            monotonic() < self._off_guard_until
+            or self._temperature_commands_in_flight > 0
+        )
+
+    def _extend_off_guard(self) -> None:
+        self._off_guard_until = max(
+            self._off_guard_until, monotonic() + OFF_REACTIVATION_GUARD
+        )
+
+    def _remember_command_context(self, _entity_id: str) -> Context:
+        """Create a context so delayed source echoes can be tied to our command."""
+        context = Context()
+        self._recent_command_context_ids.append(context.id)
+        return context
+
+    def _is_stale_source_activation(self, event: Event[EventStateChangedData]) -> bool:
+        """Return whether a source turned on as an echo of our own off or setpoint."""
+        if not self._user_wants_sources_off():
+            return False
+        new_state = event.data["new_state"]
+        if new_state is None or new_state.state in (
+            HVACMode.OFF,
+            STATE_UNKNOWN,
+            STATE_UNAVAILABLE,
+        ):
+            return False
+        if self._off_guard_active():
+            return True
+        context = getattr(event, "context", None)
+        context_id = getattr(context, "id", None)
+        return bool(context_id and context_id in self._recent_command_context_ids)
 
     def _source_hvac_mode(self) -> HVACMode | None:
         """Return the concrete active source mode."""
@@ -686,6 +746,8 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         self._source_off_requested = True
         self._heat_cool_enabled = False
         self._idle_source_mode = None
+        self._stale_reoff_count = 0
+        self._extend_off_guard()
         source_entities = [self._cooling_entity]
         if self._heating_entity is not None:
             source_entities.append(self._heating_entity)
@@ -775,12 +837,18 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         self, entity_id: str, temperature: float
     ) -> None:
         """Set and record a requested source temperature."""
+        if self._user_wants_sources_off():
+            return
         pending = self._expected_source_temperatures.setdefault(
             entity_id, deque(maxlen=MAX_EXPECTED_TARGETS)
         )
         expected = (temperature, monotonic())
         pending.append(expected)
+        self._temperature_commands_in_flight += 1
         try:
+            if self._user_wants_sources_off():
+                pending.remove(expected)
+                return
             await self.hass.services.async_call(
                 "climate",
                 "set_temperature",
@@ -789,6 +857,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                     ATTR_TEMPERATURE: temperature,
                 },
                 blocking=True,
+                context=self._remember_command_context(entity_id),
             )
         except Exception:
             try:
@@ -798,11 +867,15 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             if not pending:
                 self._expected_source_temperatures.pop(entity_id, None)
             raise
+        finally:
+            self._temperature_commands_in_flight -= 1
+            if self._user_wants_sources_off():
+                self._extend_off_guard()
+                self._expected_source_temperatures.pop(entity_id, None)
         self._last_requested_temperature = temperature
 
-    @callback
-    def _expected_targets(self, entity_id: str) -> list[float]:
-        """Return non-expired source commands."""
+    def _expected_target_entries(self, entity_id: str) -> list[tuple[float, float]]:
+        """Return non-expired source commands and the time they were sent."""
         pending = self._expected_source_temperatures.get(entity_id)
         if pending is None:
             return []
@@ -812,7 +885,140 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         if not pending:
             self._expected_source_temperatures.pop(entity_id, None)
             return []
-        return [temperature for temperature, _created_at in pending]
+        return list(pending)
+
+    @callback
+    def _expected_targets(self, entity_id: str) -> list[float]:
+        """Return non-expired source commands."""
+        return [
+            temperature
+            for temperature, _created_at in self._expected_target_entries(entity_id)
+        ]
+
+    def _command_age(self, entity_id: str, command: float, step: float) -> float | None:
+        """Return the age of the newest matching command, if one is pending."""
+        now = monotonic()
+        ages = [
+            now - created_at
+            for temperature, created_at in self._expected_target_entries(entity_id)
+            if abs(temperature - command) < step / 2
+        ]
+        if not ages:
+            return None
+        return min(ages)
+
+    def _has_fresh_command(self, entity_id: str, command: float, step: float) -> bool:
+        age = self._command_age(entity_id, command, step)
+        return age is not None and age <= COARSE_RESOLUTION_WINDOW
+
+    def _allows_coarser_match(
+        self, entity_id: str, command: float, step: float
+    ) -> bool:
+        """Return whether this source may report ``command`` on a coarser grid."""
+        if (
+            entity_id in self._source_honors_step
+            and entity_id not in self._source_coarse
+        ):
+            return False
+        if entity_id in self._source_coarse:
+            return True
+        return self._has_fresh_command(entity_id, command, step)
+
+    def _source_command_applied(
+        self,
+        entity_id: str,
+        reported: float,
+        command: float,
+        step: float,
+    ) -> bool:
+        """Return whether the source is already at ``command``, and learn if not."""
+        allow_coarser = self._allows_coarser_match(entity_id, command, step)
+        quantizer = self._source_quantizer.get(entity_id) if allow_coarser else None
+        if not source_reported_command(
+            reported,
+            command,
+            step,
+            allow_coarser=allow_coarser,
+            quantizer=quantizer,
+        ):
+            return False
+        if matches_coarse_command(reported, command, step, quantizer=quantizer):
+            self._remember_coarse_reading(entity_id, reported, [command], step)
+            return True
+        age = self._command_age(entity_id, command, step)
+        if (
+            has_finer_resolution(reported, step)
+            and entity_id not in self._source_coarse
+            and age is not None
+            and age > COARSE_RESOLUTION_WINDOW
+        ):
+            self._source_honors_step.add(entity_id)
+            self._source_quantizer.pop(entity_id, None)
+        return True
+
+    def _coarser_targets_for(self, entity_id: str) -> list[float]:
+        """Return commands whose coarse readings must not move the virtual target."""
+        if (
+            entity_id in self._source_honors_step
+            and entity_id not in self._source_coarse
+        ):
+            return []
+        entries = self._expected_target_entries(entity_id)
+        if entity_id in self._source_coarse:
+            return [temperature for temperature, _created_at in entries]
+        now = monotonic()
+        return [
+            temperature
+            for temperature, created_at in entries
+            if now - created_at <= COARSE_RESOLUTION_WINDOW
+        ]
+
+    def _note_source_resolution(
+        self,
+        entity_id: str,
+        old_target: float | None,
+        new_target: float,
+        step: float,
+    ) -> None:
+        """Remember when a source proves it can hold its advertised step."""
+        if not has_finer_resolution(new_target, step):
+            return
+        entries = self._expected_target_entries(entity_id)
+        matches_pending = any(
+            abs(new_target - temperature) < step / 2
+            for temperature, _created_at in entries
+        )
+        if matches_pending:
+            now = monotonic()
+            held = old_target is not None and abs(new_target - old_target) < step / 2
+            aged = any(
+                abs(new_target - temperature) < step / 2
+                and now - created_at > COARSE_RESOLUTION_WINDOW
+                for temperature, created_at in entries
+            )
+            if not (held and aged):
+                return
+        self._source_honors_step.add(entity_id)
+        self._source_coarse.discard(entity_id)
+        self._source_quantizer.pop(entity_id, None)
+
+    def _remember_coarse_reading(
+        self,
+        entity_id: str,
+        reported: float,
+        commands: Sequence[float],
+        step: float,
+    ) -> None:
+        quantizer = self._source_quantizer.get(entity_id)
+        for command in commands:
+            if not matches_coarse_command(reported, command, step, quantizer=quantizer):
+                continue
+            learned = learn_quantizer(reported, command, step)
+            if learned and entity_id not in self._source_quantizer:
+                self._source_quantizer[entity_id] = learned
+            self._source_coarse.add(entity_id)
+            self._source_honors_step.discard(entity_id)
+            return
 
     @callback
     def _async_source_changed(self, event: Event[EventStateChangedData]) -> None:
@@ -842,9 +1048,18 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 self.hass.async_create_task(self._async_sync_ceiling_fan())
             return
         mode_changed = self._sync_mode_from_event(event)
-        target_changed = (
-            False if mode_changed is None else self._sync_target_from_event(event)
-        )
+        new_state = event.data["new_state"]
+        if (
+            self._user_wants_sources_off()
+            and entity_id in (self._cooling_entity, self._heating_entity)
+            and new_state is not None
+            and new_state.state not in (HVACMode.OFF, STATE_UNKNOWN, STATE_UNAVAILABLE)
+        ):
+            target_changed = False
+        else:
+            target_changed = (
+                False if mode_changed is None else self._sync_target_from_event(event)
+            )
         self.async_write_ha_state()
         if entity_id in (self._cooling_entity, self._heating_entity):
             self.hass.async_create_task(
@@ -873,6 +1088,13 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         mode = HVACMode.COOL if entity_id == self._cooling_entity else HVACMode.HEAT
         if new_state.state == HVACMode.OFF and self._idle_source_mode == mode:
             return None
+        if self._is_stale_source_activation(event):
+            return False
+        if self._user_wants_sources_off() and new_state.state in (
+            HVACMode.HEAT,
+            HVACMode.COOL,
+        ):
+            self._cancel_source_off_retry()
         if not self._heat_cool_enabled or self._transition_lock.locked():
             return False
 
@@ -889,6 +1111,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
     async def _async_set_source_mode(self, entity_id: str, mode: HVACMode) -> None:
         """Set and record a requested source mode."""
         self._expect_source_mode(entity_id, mode)
+        context = self._remember_command_context(entity_id)
         try:
             state = self.hass.states.get(entity_id)
             supported_features = (
@@ -902,7 +1125,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 and state.state == HVACMode.OFF
                 and supported_features & ClimateEntityFeature.TURN_ON
             ):
-                await self._async_turn_source_on(entity_id)
+                await self._async_turn_source_on(entity_id, context=context)
                 state = self.hass.states.get(entity_id)
                 if state is not None and state.state == mode:
                     return
@@ -915,6 +1138,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                     SERVICE_TURN_OFF,
                     {"entity_id": entity_id},
                     blocking=True,
+                    context=context,
                 )
                 return
             await self.hass.services.async_call(
@@ -922,12 +1146,15 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 "set_hvac_mode",
                 {"entity_id": entity_id, "hvac_mode": mode},
                 blocking=True,
+                context=context,
             )
         except Exception:
             self._expected_source_modes.pop(entity_id, None)
             raise
 
-    async def _async_turn_source_on(self, entity_id: str) -> None:
+    async def _async_turn_source_on(
+        self, entity_id: str, context: Context | None = None
+    ) -> None:
         """Power on a source and wait until it leaves the off state."""
         loop = asyncio.get_running_loop()
         started = loop.create_future()
@@ -952,6 +1179,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 SERVICE_TURN_ON,
                 {"entity_id": entity_id},
                 blocking=True,
+                context=context,
             )
             state = self.hass.states.get(entity_id)
             if state is None or state.state in (
@@ -1008,16 +1236,20 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             return False
 
         step = self._source_temperature_step(new_state)
+        old_value = float(old_target) if isinstance(old_target, (int, float)) else None
+        self._note_source_resolution(entity_id, old_value, new_target, step)
         expected_targets = self._expected_targets(entity_id)
+        coarser_targets = self._coarser_targets_for(entity_id)
         adopt, _ = evaluate_source_target_change(
-            old_target=(
-                float(old_target) if isinstance(old_target, (int, float)) else None
-            ),
+            old_target=old_value,
             new_target=new_target,
             expected_targets=expected_targets,
             step=step,
+            coarser_targets=coarser_targets,
+            quantizer=self._source_quantizer.get(entity_id),
         )
         if not adopt:
+            self._remember_coarse_reading(entity_id, new_target, coarser_targets, step)
             return False
 
         self._expected_source_temperatures.pop(entity_id, None)
@@ -1041,6 +1273,17 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         """Mirror original source changes and enforce mutual exclusion."""
         async with self._transition_lock:
             state = self.hass.states.get(entity_id)
+            if self._user_wants_sources_off():
+                if (
+                    state is not None
+                    and state.state in (HVACMode.HEAT, HVACMode.COOL)
+                    and self._stale_reoff_count < MAX_STALE_REOFFS
+                ):
+                    self._stale_reoff_count += 1
+                    await self._async_turn_source_off(entity_id, force=True)
+                await self._async_sync_ceiling_fan(HVACMode.OFF)
+                self.async_write_ha_state()
+                return
             if (
                 entity_id == self._cooling_entity
                 and state is not None
@@ -1069,6 +1312,8 @@ class BetterClimate(ClimateEntity, RestoreEntity):
 
             await self._async_sync_ceiling_fan()
             self.async_write_ha_state()
+        if self._user_wants_sources_off():
+            return
         await self._async_reconcile(force=force)
 
     async def _async_initialize_control(self) -> None:
@@ -1103,6 +1348,8 @@ class BetterClimate(ClimateEntity, RestoreEntity):
         self.hass.async_create_task(self._async_reconcile(force=force))
 
     async def _async_reconcile(self, force: bool = False) -> None:
+        if self._user_wants_sources_off():
+            return
         self._ensure_target_temperature()
         self._ensure_target_range()
         virtual_mode = self.hvac_mode
@@ -1214,6 +1461,9 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                     self._cancel_idle_cooling_off_timer()
                     return
 
+            if self._user_wants_sources_off():
+                return
+
             activated_source = False
             if source.state != mode:
                 if mode == HVACMode.COOL and self._power_off_when_cooling_idle:
@@ -1234,9 +1484,13 @@ class BetterClimate(ClimateEntity, RestoreEntity):
 
             current_command = source.attributes.get(ATTR_TEMPERATURE)
             source_step = self._source_temperature_step(source)
-            if (
-                isinstance(current_command, (int, float))
-                and abs(float(current_command) - command_temperature) < source_step / 2
+            if isinstance(
+                current_command, (int, float)
+            ) and self._source_command_applied(
+                source_entity,
+                float(current_command),
+                command_temperature,
+                source_step,
             ):
                 return
 
@@ -1249,6 +1503,8 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 self._set_pending_timer(self._min_command_interval - elapsed)
                 return
 
+            if self._user_wants_sources_off():
+                return
             self._cancel_pending_timer()
             await self._async_set_source_temperature(
                 source_entity,
@@ -1292,17 +1548,18 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             step=self._source_temperature_step(source),
         )
         current = source.attributes.get(ATTR_TEMPERATURE)
-        if (
-            isinstance(current, (int, float))
-            and abs(float(current) - fallback)
-            < self._source_temperature_step(source) / 2
-        ):
-            self.async_write_ha_state()
-            return
         source_entity = (
             self._cooling_entity if mode == HVACMode.COOL else self._heating_entity
         )
         if source_entity is None:
+            return
+        source_step = self._source_temperature_step(source)
+        if isinstance(current, (int, float)) and self._source_command_applied(
+            source_entity, float(current), fallback, source_step
+        ):
+            self.async_write_ha_state()
+            return
+        if self._user_wants_sources_off():
             return
         await self._async_set_source_temperature(source_entity, fallback)
         self._last_command_at = monotonic()

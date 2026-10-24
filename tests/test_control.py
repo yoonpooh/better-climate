@@ -15,8 +15,12 @@ SPEC.loader.exec_module(control)
 calculate_control = control.calculate_control
 calculate_heating_control = control.calculate_heating_control
 evaluate_source_target_change = control.evaluate_source_target_change
+has_finer_resolution = control.has_finer_resolution
+learn_quantizer = control.learn_quantizer
+matches_coarse_command = control.matches_coarse_command
 round_and_clamp = control.round_and_clamp
 select_heat_cool_mode = control.select_heat_cool_mode
+source_reported_command = control.source_reported_command
 
 
 class ControlTest(unittest.TestCase):
@@ -273,6 +277,85 @@ class SourceSynchronizationTest(unittest.TestCase):
                 expected_targets=[],
                 step=0,
             )
+
+    def test_coarse_echo_is_opt_in(self) -> None:
+        self.assertEqual(
+            evaluate_source_target_change(
+                old_target=22.0,
+                new_target=23.0,
+                expected_targets=[23.5],
+                step=0.5,
+            ),
+            (True, None),
+        )
+
+    def test_coarse_floor_or_round_of_a_pending_command_is_not_adopted(self) -> None:
+        self.assertEqual(
+            evaluate_source_target_change(
+                old_target=22.0,
+                new_target=23.0,
+                expected_targets=[23.5],
+                step=0.5,
+                coarser_targets=[23.5],
+            ),
+            (False, None),
+        )
+        self.assertEqual(
+            evaluate_source_target_change(
+                old_target=23.5,
+                new_target=24.0,
+                expected_targets=[23.5],
+                step=0.5,
+                coarser_targets=[23.5],
+            ),
+            (False, None),
+        )
+
+    def test_manual_change_is_adopted_while_a_coarse_command_is_pending(self) -> None:
+        self.assertEqual(
+            evaluate_source_target_change(
+                old_target=23.0,
+                new_target=21.0,
+                expected_targets=[23.5],
+                step=0.5,
+                coarser_targets=[23.5],
+            ),
+            (True, None),
+        )
+
+    def test_learned_floor_quantizer_does_not_hide_the_opposite_snap(self) -> None:
+        self.assertEqual(
+            evaluate_source_target_change(
+                old_target=23.0,
+                new_target=24.0,
+                expected_targets=[23.5],
+                step=0.5,
+                coarser_targets=[23.5],
+                quantizer="floor",
+            ),
+            (True, None),
+        )
+        self.assertFalse(
+            source_reported_command(
+                24.0, 23.5, 0.5, allow_coarser=True, quantizer="floor"
+            )
+        )
+        self.assertTrue(
+            source_reported_command(
+                23.0, 23.5, 0.5, allow_coarser=True, quantizer="floor"
+            )
+        )
+        self.assertTrue(source_reported_command(23.5, 23.5, 0.5, allow_coarser=False))
+
+    def test_quantizer_learning_distinguishes_floor_from_half_up(self) -> None:
+        self.assertEqual(learn_quantizer(23.0, 23.5, 0.5), "floor")
+        self.assertEqual(learn_quantizer(24.0, 23.5, 0.5), "up")
+        self.assertIsNone(learn_quantizer(22.0, 23.5, 0.5))
+        self.assertIsNone(learn_quantizer(23.5, 23.5, 0.5))
+        self.assertTrue(matches_coarse_command(15.0, 15.5, 0.5))
+        self.assertFalse(matches_coarse_command(15.5, 15.5, 0.5))
+        self.assertTrue(has_finer_resolution(23.5, 0.5))
+        self.assertFalse(has_finer_resolution(23.0, 0.5))
 
 
 class TargetNormalizationTest(unittest.TestCase):

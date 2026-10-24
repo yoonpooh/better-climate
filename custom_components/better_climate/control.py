@@ -6,6 +6,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from math import floor, isfinite
 
+_QUANTIZE_TOLERANCE = 1e-3
+
 
 @dataclass(frozen=True)
 class ControlResult:
@@ -23,12 +25,115 @@ class HeatingControlResult:
     command_temperature: float
 
 
+def _coarse_grids(step: float) -> list[float]:
+    """Return grids coarser than ``step``, including whole degrees."""
+    grids: list[float] = []
+    coarse = step * 2
+    while coarse < 1 - 1e-9:
+        grids.append(coarse)
+        coarse *= 2
+    if step < 1 - 1e-9:
+        grids.append(1.0)
+    return grids
+
+
+def _grid_values(commanded: float, coarse: float) -> tuple[float, float]:
+    """Return the floor and half-up snaps of a command onto ``coarse``."""
+    floor_value = round(floor(commanded / coarse + 1e-9) * coarse, 6)
+    up_value = round(floor(commanded / coarse + 0.5) * coarse, 6)
+    return floor_value, up_value
+
+
+def matches_coarse_command(
+    reported: float,
+    commanded: float,
+    step: float,
+    *,
+    quantizer: str | None = None,
+) -> bool:
+    """Return whether ``reported`` is ``commanded`` snapped onto a coarser grid.
+
+    ``quantizer`` restricts the snap to ``floor`` or ``up`` after a source has
+    shown which way it resolves half steps. ``None`` accepts either snap so the
+    first coarse reading can be recognized.
+    """
+    if step <= 0:
+        raise ValueError("step must be greater than zero")
+    if abs(reported - commanded) < step / 2:
+        return False
+    for coarse in _coarse_grids(step):
+        floor_value, up_value = _grid_values(commanded, coarse)
+        distinct = abs(floor_value - up_value) > _QUANTIZE_TOLERANCE
+        if not distinct:
+            continue
+        if quantizer == "floor" and abs(reported - floor_value) <= _QUANTIZE_TOLERANCE:
+            return True
+        if quantizer == "up" and abs(reported - up_value) <= _QUANTIZE_TOLERANCE:
+            return True
+        if quantizer is None and (
+            abs(reported - floor_value) <= _QUANTIZE_TOLERANCE
+            or abs(reported - up_value) <= _QUANTIZE_TOLERANCE
+        ):
+            return True
+    return False
+
+
+def learn_quantizer(reported: float, commanded: float, step: float) -> str | None:
+    """Return ``floor`` or ``up`` when a coarse reading identifies one of them."""
+    if step <= 0:
+        raise ValueError("step must be greater than zero")
+    if abs(reported - commanded) < step / 2:
+        return None
+    found: list[str] = []
+    for coarse in _coarse_grids(step):
+        floor_value, up_value = _grid_values(commanded, coarse)
+        if abs(floor_value - up_value) <= _QUANTIZE_TOLERANCE:
+            continue
+        if abs(reported - floor_value) <= _QUANTIZE_TOLERANCE:
+            found.append("floor")
+        elif abs(reported - up_value) <= _QUANTIZE_TOLERANCE:
+            found.append("up")
+    unique = set(found)
+    if len(unique) == 1:
+        return found[0]
+    return None
+
+
+def has_finer_resolution(value: float, step: float) -> bool:
+    """Return whether ``value`` is on ``step`` but not on a whole degree."""
+    if step <= 0:
+        raise ValueError("step must be greater than zero")
+    if abs(value - round(value)) <= _QUANTIZE_TOLERANCE:
+        return False
+    return abs(value / step - round(value / step)) <= _QUANTIZE_TOLERANCE
+
+
+def source_reported_command(
+    reported: float,
+    commanded: float,
+    step: float,
+    *,
+    allow_coarser: bool = False,
+    quantizer: str | None = None,
+) -> bool:
+    """Return whether a source reading already represents ``commanded``."""
+    if step <= 0:
+        raise ValueError("step must be greater than zero")
+    if abs(reported - commanded) < step / 2:
+        return True
+    if not allow_coarser:
+        return False
+    return matches_coarse_command(reported, commanded, step, quantizer=quantizer)
+
+
 def evaluate_source_target_change(
     *,
     old_target: float | None,
     new_target: float,
     expected_targets: Sequence[float],
     step: float,
+    coarser_targets: Sequence[float] = (),
+    quantizer: str | None = None,
 ) -> tuple[bool, int | None]:
     """Return whether to adopt a source target and any matched command index."""
     if step <= 0:
@@ -36,6 +141,11 @@ def evaluate_source_target_change(
     for index, expected_target in enumerate(expected_targets):
         if abs(new_target - expected_target) < step / 2:
             return False, index
+    for expected_target in coarser_targets:
+        if matches_coarse_command(
+            new_target, expected_target, step, quantizer=quantizer
+        ):
+            return False, None
     return (
         old_target is None or abs(new_target - old_target) >= step / 2,
         None,
