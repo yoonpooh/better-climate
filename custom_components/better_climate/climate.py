@@ -464,7 +464,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
             self._off_guard_until, monotonic() + OFF_REACTIVATION_GUARD
         )
 
-    def _remember_command_context(self, _entity_id: str) -> Context:
+    def _remember_command_context(self) -> Context:
         """Create a context so delayed source echoes can be tied to our command."""
         context = Context()
         self._recent_command_context_ids.append(context.id)
@@ -857,7 +857,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                     ATTR_TEMPERATURE: temperature,
                 },
                 blocking=True,
-                context=self._remember_command_context(entity_id),
+                context=self._remember_command_context(),
             )
         except Exception:
             try:
@@ -874,18 +874,17 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 self._expected_source_temperatures.pop(entity_id, None)
         self._last_requested_temperature = temperature
 
-    def _expected_target_entries(self, entity_id: str) -> list[tuple[float, float]]:
+    def _expected_target_entries(self, entity_id: str) -> Sequence[tuple[float, float]]:
         """Return non-expired source commands and the time they were sent."""
         pending = self._expected_source_temperatures.get(entity_id)
         if pending is None:
-            return []
+            return ()
         now = monotonic()
         while pending and now - pending[0][1] > EXPECTED_TARGET_TTL:
             pending.popleft()
         if not pending:
             self._expected_source_temperatures.pop(entity_id, None)
-            return []
-        return list(pending)
+        return pending
 
     @callback
     def _expected_targets(self, entity_id: str) -> list[float]:
@@ -898,14 +897,11 @@ class BetterClimate(ClimateEntity, RestoreEntity):
     def _command_age(self, entity_id: str, command: float, step: float) -> float | None:
         """Return the age of the newest matching command, if one is pending."""
         now = monotonic()
-        ages = [
-            now - created_at
-            for temperature, created_at in self._expected_target_entries(entity_id)
-            if abs(temperature - command) < step / 2
-        ]
-        if not ages:
-            return None
-        return min(ages)
+        entries = self._expected_target_entries(entity_id)
+        for temperature, created_at in reversed(entries):
+            if abs(temperature - command) < step / 2:
+                return now - created_at
+        return None
 
     def _has_fresh_command(self, entity_id: str, command: float, step: float) -> bool:
         age = self._command_age(entity_id, command, step)
@@ -1111,7 +1107,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
     async def _async_set_source_mode(self, entity_id: str, mode: HVACMode) -> None:
         """Set and record a requested source mode."""
         self._expect_source_mode(entity_id, mode)
-        context = self._remember_command_context(entity_id)
+        context = self._remember_command_context()
         try:
             state = self.hass.states.get(entity_id)
             supported_features = (
@@ -1421,6 +1417,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 await self._async_fallback_to_source_thermostat(mode, source)
                 return
 
+            source_step = self._source_temperature_step(source)
             if mode == HVACMode.COOL:
                 cooling_result = calculate_control(
                     room_temperature=room,
@@ -1431,7 +1428,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                     force_offset=self._force_offset,
                     minimum=self._source_min_temp(source),
                     maximum=self._source_max_temp(source),
-                    step=self._source_temperature_step(source),
+                    step=source_step,
                 )
                 self._cooling_required = cooling_result.cooling_required
                 command_temperature = cooling_result.command_temperature
@@ -1445,7 +1442,7 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                     force_offset=self._force_offset,
                     minimum=self._source_min_temp(source),
                     maximum=self._source_max_temp(source),
-                    step=self._source_temperature_step(source),
+                    step=source_step,
                 )
                 self._heating_required = heating_result.heating_required
                 command_temperature = heating_result.command_temperature
@@ -1483,7 +1480,6 @@ class BetterClimate(ClimateEntity, RestoreEntity):
                 activated_source = True
 
             current_command = source.attributes.get(ATTR_TEMPERATURE)
-            source_step = self._source_temperature_step(source)
             if isinstance(
                 current_command, (int, float)
             ) and self._source_command_applied(

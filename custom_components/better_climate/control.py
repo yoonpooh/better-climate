@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from math import floor, isfinite
 
@@ -25,23 +25,22 @@ class HeatingControlResult:
     command_temperature: float
 
 
-def _coarse_grids(step: float) -> list[float]:
-    """Return grids coarser than ``step``, including whole degrees."""
-    grids: list[float] = []
+def _coarse_grids(step: float) -> Iterator[float]:
     coarse = step * 2
     while coarse < 1 - 1e-9:
-        grids.append(coarse)
+        yield coarse
         coarse *= 2
     if step < 1 - 1e-9:
-        grids.append(1.0)
-    return grids
+        yield 1.0
 
 
-def _grid_values(commanded: float, coarse: float) -> tuple[float, float]:
-    """Return the floor and half-up snaps of a command onto ``coarse``."""
-    floor_value = round(floor(commanded / coarse + 1e-9) * coarse, 6)
-    up_value = round(floor(commanded / coarse + 0.5) * coarse, 6)
-    return floor_value, up_value
+def _coarse_snaps(commanded: float, step: float) -> Iterator[tuple[float, float]]:
+    for coarse in _coarse_grids(step):
+        grid_position = commanded / coarse
+        floor_value = round(floor(grid_position + 1e-9) * coarse, 6)
+        up_value = round(floor(grid_position + 0.5) * coarse, 6)
+        if abs(floor_value - up_value) > _QUANTIZE_TOLERANCE:
+            yield floor_value, up_value
 
 
 def matches_coarse_command(
@@ -61,19 +60,12 @@ def matches_coarse_command(
         raise ValueError("step must be greater than zero")
     if abs(reported - commanded) < step / 2:
         return False
-    for coarse in _coarse_grids(step):
-        floor_value, up_value = _grid_values(commanded, coarse)
-        distinct = abs(floor_value - up_value) > _QUANTIZE_TOLERANCE
-        if not distinct:
-            continue
-        if quantizer == "floor" and abs(reported - floor_value) <= _QUANTIZE_TOLERANCE:
+    check_floor = quantizer in (None, "floor")
+    check_up = quantizer in (None, "up")
+    for floor_value, up_value in _coarse_snaps(commanded, step):
+        if check_floor and abs(reported - floor_value) <= _QUANTIZE_TOLERANCE:
             return True
-        if quantizer == "up" and abs(reported - up_value) <= _QUANTIZE_TOLERANCE:
-            return True
-        if quantizer is None and (
-            abs(reported - floor_value) <= _QUANTIZE_TOLERANCE
-            or abs(reported - up_value) <= _QUANTIZE_TOLERANCE
-        ):
+        if check_up and abs(reported - up_value) <= _QUANTIZE_TOLERANCE:
             return True
     return False
 
@@ -84,19 +76,18 @@ def learn_quantizer(reported: float, commanded: float, step: float) -> str | Non
         raise ValueError("step must be greater than zero")
     if abs(reported - commanded) < step / 2:
         return None
-    found: list[str] = []
-    for coarse in _coarse_grids(step):
-        floor_value, up_value = _grid_values(commanded, coarse)
-        if abs(floor_value - up_value) <= _QUANTIZE_TOLERANCE:
-            continue
+    learned: str | None = None
+    for floor_value, up_value in _coarse_snaps(commanded, step):
         if abs(reported - floor_value) <= _QUANTIZE_TOLERANCE:
-            found.append("floor")
+            found = "floor"
         elif abs(reported - up_value) <= _QUANTIZE_TOLERANCE:
-            found.append("up")
-    unique = set(found)
-    if len(unique) == 1:
-        return found[0]
-    return None
+            found = "up"
+        else:
+            continue
+        if learned not in (None, found):
+            return None
+        learned = found
+    return learned
 
 
 def has_finer_resolution(value: float, step: float) -> bool:
